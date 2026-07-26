@@ -1,0 +1,1379 @@
+{
+  "manifest_schema_version": 3,
+  "sdk_version": "5.9.12",
+  "app_id": "seo-audit-engine",
+  "version": "1.0.0",
+  "name": "SEO Audit Engine",
+  "description": "Технический SEO-аудит портфеля сайтов: обход страниц, 18 правил в шести слоях, отчёты по каждому сайту и по портфелю, и готовые задачи для трекера. Только чтение — аудит ничего не меняет на сайтах.",
+  "icon": "icon.svg",
+  "actions_explicit": true,
+  "system": false,
+  "capabilities": [
+    "seo:audit",
+    "seo:report"
+  ],
+  "tools": [
+    {
+      "name": "audit_sites",
+      "description": "Запустить SEO-аудит одного или нескольких сайтов. Обходит страницы, проверяет 18 правил в шести слоях и записывает находки. Аудит только читает — ничего на сайтах не меняет. Долгие прогоны идут в фоне: подтверждение приходит сразу, итог — отдельным сообщением.",
+      "action_type": "write",
+      "chain_callable": true,
+      "effects": [
+        "create:audit_run"
+      ],
+      "id_projection": "",
+      "params_schema": {
+        "description": "Что проверять и насколько глубоко.",
+        "properties": {
+          "sites": {
+            "default": "",
+            "description": "Домены через запятую или с новой строки, например 'climtec.md, ksrenovationgroup.com'. Схему писать не нужно.",
+            "title": "Sites",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "description": "Название прогона, например 'июль, портфель агентства'",
+            "title": "Label",
+            "type": "string"
+          },
+          "max_pages": {
+            "default": 50,
+            "description": "Сколько страниц смотреть на каждом сайте. 50 хватает, чтобы увидеть системные дефекты.",
+            "maximum": 500,
+            "minimum": 1,
+            "title": "Max Pages",
+            "type": "integer"
+          },
+          "site_workers": {
+            "default": 4,
+            "description": "Сколько САЙТОВ обходить одновременно",
+            "maximum": 16,
+            "minimum": 1,
+            "title": "Site Workers",
+            "type": "integer"
+          },
+          "page_workers": {
+            "default": 4,
+            "description": "Сколько страниц одновременно внутри ОДНОГО сайта. Держите небольшим: это нагрузка на чужой сервер.",
+            "maximum": 8,
+            "minimum": 1,
+            "title": "Page Workers",
+            "type": "integer"
+          }
+        },
+        "title": "AuditSitesParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Подтверждение запуска: что именно началось и сколько это займёт.\n\nОценка времени здесь не украшение: аудит идёт минуты или десятки минут, и\nбез неё пользователь не понимает, ждать ему или заняться другим.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "run_id": {
+            "default": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "sites_count": {
+            "default": 0,
+            "title": "Sites Count",
+            "type": "integer"
+          },
+          "sites": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Sites",
+            "type": "array"
+          },
+          "max_pages": {
+            "default": 0,
+            "title": "Max Pages",
+            "type": "integer"
+          },
+          "estimate": {
+            "default": "",
+            "title": "Estimate",
+            "type": "string"
+          },
+          "resumed": {
+            "default": false,
+            "title": "Resumed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "RunStarted",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "seo-audit-engine.audit_sites",
+      "background": true,
+      "long_running": true,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "resume_audit",
+      "description": "Продолжить прерванный аудит с того места, где он остановился — уже проверенные страницы не перезагружаются.",
+      "action_type": "write",
+      "chain_callable": true,
+      "effects": [
+        "update:audit_run"
+      ],
+      "id_projection": "",
+      "params_schema": {
+        "description": "Продолжение прерванного прогона.\n\nОтдельная модель, а не поле в AuditSitesParams: продолжение НЕ принимает\nсписок сайтов — он уже записан в прогоне, и передать другой значило бы\nмолча подменить предмет работы.",
+        "properties": {
+          "run_id": {
+            "default": 0,
+            "description": "Номер прогона. 0 или пусто — последний незавершённый.",
+            "minimum": 0,
+            "title": "Run Id",
+            "type": "integer"
+          }
+        },
+        "title": "ResumeAuditParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Итог прогона: оценка портфеля, задачи, что упало.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "run_id": {
+            "default": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "sites_total": {
+            "default": 0,
+            "title": "Sites Total",
+            "type": "integer"
+          },
+          "sites_done": {
+            "default": 0,
+            "title": "Sites Done",
+            "type": "integer"
+          },
+          "sites_failed": {
+            "default": 0,
+            "title": "Sites Failed",
+            "type": "integer"
+          },
+          "pages_checked": {
+            "default": 0,
+            "title": "Pages Checked",
+            "type": "integer"
+          },
+          "findings_total": {
+            "default": 0,
+            "title": "Findings Total",
+            "type": "integer"
+          },
+          "tasks_total": {
+            "default": 0,
+            "title": "Tasks Total",
+            "type": "integer"
+          },
+          "critical": {
+            "default": 0,
+            "title": "Critical",
+            "type": "integer"
+          },
+          "high": {
+            "default": 0,
+            "title": "High",
+            "type": "integer"
+          },
+          "worst_site": {
+            "default": "",
+            "title": "Worst Site",
+            "type": "string"
+          },
+          "worst_score": {
+            "default": 0,
+            "title": "Worst Score",
+            "type": "integer"
+          },
+          "finished": {
+            "default": false,
+            "title": "Finished",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "RunSummary",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "seo-audit-engine.resume_audit",
+      "background": true,
+      "long_running": true,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "list_runs",
+      "description": "Показать прошлые аудиты: когда, по каким сайтам, сколько задач нашлось.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "properties": {
+          "limit": {
+            "default": 10,
+            "description": "Сколько прогонов вернуть",
+            "maximum": 50,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "ListRunsParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Итог прогона: оценка портфеля, задачи, что упало.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "run_id": {
+            "default": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "sites_total": {
+            "default": 0,
+            "title": "Sites Total",
+            "type": "integer"
+          },
+          "sites_done": {
+            "default": 0,
+            "title": "Sites Done",
+            "type": "integer"
+          },
+          "sites_failed": {
+            "default": 0,
+            "title": "Sites Failed",
+            "type": "integer"
+          },
+          "pages_checked": {
+            "default": 0,
+            "title": "Pages Checked",
+            "type": "integer"
+          },
+          "findings_total": {
+            "default": 0,
+            "title": "Findings Total",
+            "type": "integer"
+          },
+          "tasks_total": {
+            "default": 0,
+            "title": "Tasks Total",
+            "type": "integer"
+          },
+          "critical": {
+            "default": 0,
+            "title": "Critical",
+            "type": "integer"
+          },
+          "high": {
+            "default": 0,
+            "title": "High",
+            "type": "integer"
+          },
+          "worst_site": {
+            "default": "",
+            "title": "Worst Site",
+            "type": "string"
+          },
+          "worst_score": {
+            "default": 0,
+            "title": "Worst Score",
+            "type": "integer"
+          },
+          "finished": {
+            "default": false,
+            "title": "Finished",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "RunSummary",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "list_sites",
+      "description": "Показать сайты последнего аудита с оценкой здоровья и главной проблемой каждого — сводка по портфелю.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "properties": {
+          "run_id": {
+            "default": 0,
+            "description": "Номер прогона. 0 или пусто — последний прогон.",
+            "minimum": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "site": {
+            "default": "",
+            "description": "Домен, например 'climtec.md'. Пусто — весь портфель.",
+            "title": "Site",
+            "type": "string"
+          },
+          "min_severity": {
+            "default": "medium",
+            "description": "Порог важности: critical, high, medium, low, info. Возвращаются находки этого уровня и выше.",
+            "title": "Min Severity",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "description": "Сколько находок вернуть",
+            "maximum": 200,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "ListFindingsParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Одна строка портфеля — сайт и его состояние.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "origin": {
+            "default": "",
+            "title": "Origin",
+            "type": "string"
+          },
+          "score": {
+            "default": 0,
+            "title": "Score",
+            "type": "integer"
+          },
+          "pages": {
+            "default": 0,
+            "title": "Pages",
+            "type": "integer"
+          },
+          "tasks": {
+            "default": 0,
+            "title": "Tasks",
+            "type": "integer"
+          },
+          "top_issue": {
+            "default": "",
+            "title": "Top Issue",
+            "type": "string"
+          },
+          "state": {
+            "default": "",
+            "title": "State",
+            "type": "string"
+          },
+          "failure": {
+            "default": "",
+            "title": "Failure",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "SiteScore",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "list_findings",
+      "description": "Показать найденные SEO-проблемы: что не так, на какой странице и насколько это важно. Можно по одному сайту или по всему портфелю.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "properties": {
+          "run_id": {
+            "default": 0,
+            "description": "Номер прогона. 0 или пусто — последний прогон.",
+            "minimum": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "site": {
+            "default": "",
+            "description": "Домен, например 'climtec.md'. Пусто — весь портфель.",
+            "title": "Site",
+            "type": "string"
+          },
+          "min_severity": {
+            "default": "medium",
+            "description": "Порог важности: critical, high, medium, low, info. Возвращаются находки этого уровня и выше.",
+            "title": "Min Severity",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "description": "Сколько находок вернуть",
+            "maximum": 200,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "ListFindingsParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Одна находка: что не так, где и насколько это важно.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "default": "",
+            "title": "Url",
+            "type": "string"
+          },
+          "rule": {
+            "default": "",
+            "title": "Rule",
+            "type": "string"
+          },
+          "severity": {
+            "default": "",
+            "title": "Severity",
+            "type": "string"
+          },
+          "layer": {
+            "default": 0,
+            "title": "Layer",
+            "type": "integer"
+          },
+          "layer_name": {
+            "default": "",
+            "title": "Layer Name",
+            "type": "string"
+          },
+          "site": {
+            "default": "",
+            "title": "Site",
+            "type": "string"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "Finding",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "list_tasks",
+      "description": "Показать задачи по итогам аудита: одна задача = один дефект на одном сайте со списком затронутых страниц внутри. Это то, что можно отдать в работу или выгрузить в трекер.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "properties": {
+          "run_id": {
+            "default": 0,
+            "description": "Номер прогона. 0 или пусто — последний прогон.",
+            "minimum": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "site": {
+            "default": "",
+            "description": "Домен. Пусто — задачи по всему портфелю.",
+            "title": "Site",
+            "type": "string"
+          },
+          "min_severity": {
+            "default": "medium",
+            "description": "Порог важности: critical, high, medium, low, info.",
+            "title": "Min Severity",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "description": "Сколько задач вернуть",
+            "maximum": 200,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "ListTasksParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Одна работа = один дефект на одном сайте, со списком страниц внутри.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "site": {
+            "default": "",
+            "title": "Site",
+            "type": "string"
+          },
+          "rule": {
+            "default": "",
+            "title": "Rule",
+            "type": "string"
+          },
+          "task_title": {
+            "default": "",
+            "title": "Task Title",
+            "type": "string"
+          },
+          "body": {
+            "default": "",
+            "title": "Body",
+            "type": "string"
+          },
+          "severity": {
+            "default": "",
+            "title": "Severity",
+            "type": "string"
+          },
+          "layer_name": {
+            "default": "",
+            "title": "Layer Name",
+            "type": "string"
+          },
+          "pages": {
+            "default": 0,
+            "title": "Pages",
+            "type": "integer"
+          },
+          "urls": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Urls",
+            "type": "array"
+          },
+          "due_days": {
+            "default": 30,
+            "title": "Due Days",
+            "type": "integer"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "autofixable": {
+            "default": false,
+            "title": "Autofixable",
+            "type": "boolean"
+          },
+          "fingerprint": {
+            "default": "",
+            "title": "Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "AuditTask",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "get_report",
+      "description": "Собрать отчёт по аудиту: сводный по портфелю или подробный по одному сайту. Возвращает готовый текст в Markdown.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "properties": {
+          "run_id": {
+            "default": 0,
+            "description": "Номер прогона. 0 или пусто — последний прогон.",
+            "minimum": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "site": {
+            "default": "",
+            "description": "Домен для отчёта по одному сайту. Пусто — сводный отчёт по всему портфелю.",
+            "title": "Site",
+            "type": "string"
+          },
+          "min_severity": {
+            "default": "medium",
+            "description": "Порог важности для задач в отчёте.",
+            "title": "Min Severity",
+            "type": "string"
+          }
+        },
+        "title": "GetReportParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Готовый отчёт в Markdown — по сайту или по портфелю.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "scope": {
+            "default": "",
+            "title": "Scope",
+            "type": "string"
+          },
+          "markdown": {
+            "default": "",
+            "title": "Markdown",
+            "type": "string"
+          },
+          "sites_count": {
+            "default": 0,
+            "title": "Sites Count",
+            "type": "integer"
+          },
+          "tasks_total": {
+            "default": 0,
+            "title": "Tasks Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "Report",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "export_plan",
+      "description": "Построить план выгрузки задач аудита в трекер: названия, описания, разделы по сроку, теги и метки для повторного аудита. Сам план ничего не создаёт — задачи заводит коннектор трекера по подтверждению.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "properties": {
+          "run_id": {
+            "default": 0,
+            "description": "Номер прогона. 0 или пусто — последний прогон.",
+            "minimum": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "site": {
+            "default": "",
+            "description": "Домен. Пусто — весь портфель.",
+            "title": "Site",
+            "type": "string"
+          },
+          "project": {
+            "default": "SEO",
+            "description": "Название проекта в трекере, например 'SEO climtec'",
+            "title": "Project",
+            "type": "string"
+          },
+          "assignee": {
+            "default": "",
+            "description": "Кому назначить задачи (имя в трекере). Можно не указывать.",
+            "title": "Assignee",
+            "type": "string"
+          },
+          "min_severity": {
+            "default": "medium",
+            "description": "Порог важности: какие задачи попадут в план.",
+            "title": "Min Severity",
+            "type": "string"
+          }
+        },
+        "title": "ExportPlanParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "План выгрузки в трекер: готовые аргументы для создания задач.\n\nОтдаём именно план, а не создаём задачи сами: аудит не должен уметь писать\nв чужой трекер. План передаётся коннектору (Asana/Notion) по подтверждению.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "tasks_total": {
+            "default": 0,
+            "title": "Tasks Total",
+            "type": "integer"
+          },
+          "sites_count": {
+            "default": 0,
+            "title": "Sites Count",
+            "type": "integer"
+          },
+          "autofixable": {
+            "default": 0,
+            "title": "Autofixable",
+            "type": "integer"
+          },
+          "pages_touched": {
+            "default": 0,
+            "title": "Pages Touched",
+            "type": "integer"
+          },
+          "by_section": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "By Section",
+            "type": "object"
+          },
+          "entries": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Entries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "ExportPlan",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    }
+  ],
+  "signals": [],
+  "schedules": [],
+  "required_scopes": [],
+  "icon_size_bytes": 448,
+  "lifecycle": {
+    "on_install": true,
+    "health_check": {
+      "interval_sec": 60
+    }
+  },
+  "lifecycle_hooks": {
+    "on_install": {
+      "signature": "(ctx)"
+    }
+  },
+  "panels": [
+    {
+      "panel_id": "seo",
+      "slot": "center",
+      "title": "SEO-аудит",
+      "tree": {},
+      "icon": "Search",
+      "refresh": "manual",
+      "center_overlay": true
+    },
+    {
+      "panel_id": "seo_nav",
+      "slot": "left",
+      "title": "SEO-аудит",
+      "tree": {},
+      "icon": "Search",
+      "refresh": "manual",
+      "center_overlay": false
+    }
+  ]
+}
