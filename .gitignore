@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+.venv/
+# Аудиты пишут базы и отчёты рядом — это данные прогона, не код.
+*.db
+*.db-journal
+*.db-wal
+reports/
+plan.json
+sites.txt
