@@ -151,3 +151,46 @@ def test_handlers_and_panels_share_one_bridge_module():
     assert handlers_audit.br is bridge
     assert handlers_read.br is bridge
     assert panels_mod.br is bridge
+
+
+def test_no_handler_invents_a_field_the_entity_does_not_declare():
+    """Поля сущностей и то, что передают обработчики, должны совпадать.
+
+    РЕАЛЬНЫЙ БАГ, найденный на живом прогоне. Обработчик заполнял
+    `site_count=` и `average_score=`, а сущность объявляла `sites_total`,
+    `sites_done`, `pages_checked`. Pydantic лишние ключи проглатывал, объявленные
+    оставались по умолчанию — и ответ выглядел так: текст «проверено 1 из 1,
+    найдено 8 проблем» рядом с нулями во всех числовых полях.
+
+    Почему это не поймали ни валидатор, ни остальные тесты: валидатор проверяет
+    ОБЪЯВЛЕНИЕ data_model, а не то, чем его заполняют; тесты рендеринга смотрят
+    на текст, который собирается из локальных переменных и потому верен. Ошибку
+    видно только при сверке имён — этим и занят этот тест.
+    """
+    import ast
+    import pathlib
+
+    import main  # noqa: F401
+    import models
+
+    entities = {name: cls for name, cls in vars(models).items()
+                if isinstance(cls, type) and hasattr(cls, "model_fields")}
+
+    problems: list[str] = []
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for fname in ("handlers_audit.py", "handlers_read.py", "panels.py"):
+        tree = ast.parse((root / fname).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            entity = entities.get(node.func.id)
+            if entity is None:
+                continue
+            declared = set(entity.model_fields)
+            for kw in node.keywords:
+                if kw.arg and kw.arg not in declared:
+                    problems.append(
+                        f"{fname}:{node.lineno} {node.func.id}(...{kw.arg}=...) "
+                        f"— поле не объявлено")
+
+    assert not problems, "обработчик заполняет несуществующие поля:\n" + "\n".join(problems)

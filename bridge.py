@@ -75,8 +75,30 @@ def parse_sites(raw: str) -> list[str]:
         key = key.strip("/").removeprefix("www.")
         if key and key not in seen:
             seen.add(key)
-            out.append(item)
+            out.append(with_scheme(item))
     return out
+
+
+def with_scheme(site: str) -> str:
+    """Дописать https://, если человек назвал домен без схемы.
+
+    ЗАЧЕМ ЭТО ЗДЕСЬ. `normalize_url` внутри движка опирается на `urlsplit`, а
+    тот в строке `climtec.md` видит ПУТЬ, а не хост: hostname пустой, и функция
+    честно возвращает ввод как есть. Дальше движок склеивал схему с таким
+    «origin» и получалось `https:///climtec.md` — три слэша, и сайт становился
+    неоткрываемым.
+
+    Починка сделана на границе ВВОДА, а не внутри движка: `normalize_url`
+    применяется и к ссылкам, найденным на страницах, где голая строка без схемы
+    — это действительно относительный путь, и додумывать ей схему было бы
+    ошибкой. Схему домысливаем ровно там, где человек ввёл домен руками.
+    """
+    s = (site or "").strip()
+    if not s:
+        return ""
+    if s.startswith(("http://", "https://")):
+        return s
+    return "https://" + s.lstrip("/")
 
 
 async def download_db(ctx) -> str | None:

@@ -18,14 +18,40 @@ import codes as c
 # --- разбор ввода -----------------------------------------------------------
 
 @pytest.mark.parametrize("raw,expected", [
-    ("climtec.md", ["climtec.md"]),
-    ("climtec.md, ksrenovationgroup.com", ["climtec.md", "ksrenovationgroup.com"]),
-    ("climtec.md\nksrenovationgroup.com\n", ["climtec.md", "ksrenovationgroup.com"]),
+    ("climtec.md", ["https://climtec.md"]),
+    ("climtec.md, ksrenovationgroup.com",
+     ["https://climtec.md", "https://ksrenovationgroup.com"]),
+    ("climtec.md\nksrenovationgroup.com\n",
+     ["https://climtec.md", "https://ksrenovationgroup.com"]),
+    ("https://climtec.md", ["https://climtec.md"]),   # уже со схемой — не трогаем
+    ("http://climtec.md", ["http://climtec.md"]),     # http сохраняем как есть
     ("", []),
 ])
 def test_sites_are_parsed_the_way_people_type_them(raw, expected):
-    """Человек пишет домены как удобно — через запятую, списком, с пробелами."""
+    """Человек пишет домены как удобно, а движку нужен полный origin.
+
+    РЕАЛЬНЫЙ БАГ, найденный на живом прогоне. `normalize_url` внутри движка
+    опирается на `urlsplit`, а тот в строке "climtec.md" видит ПУТЬ, а не хост:
+    hostname пустой, функция возвращает ввод как есть. Движок затем склеивал
+    схему с таким origin и получалось `https:///climtec.md` — три слэша. В
+    отчёте появился неоткрываемый адрес.
+
+    Схему дописываем на границе ВВОДА, а не внутри `normalize_url`: та же
+    функция применяется к ссылкам, найденным на страницах, где строка без схемы
+    — это законный относительный путь, и додумывать ей схему было бы ошибкой.
+    """
     assert br.parse_sites(raw) == expected
+
+
+def test_a_bare_domain_never_becomes_a_triple_slash_origin():
+    """Ровно тот дефект, который испортил первый живой отчёт."""
+    for raw in ("climtec.md", "www.climtec.md", "climtec.md/"):
+        origin = br.parse_sites(raw)[0]
+        assert not origin.startswith("https:///"), origin
+        assert origin.startswith("https://")
+        # и origin обязан быть открываемым: хост непустой
+        from urllib.parse import urlsplit
+        assert urlsplit(origin).hostname, origin
 
 
 def test_a_site_is_not_audited_twice_in_one_run():

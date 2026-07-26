@@ -98,7 +98,10 @@ async def audit_sites(ctx, params: AuditSitesParams) -> ActionResult:
                     if sev in counts:
                         counts[sev] += n
             avg = int(sum(r["score"] for r in done) / len(done)) if done else 0
-            worst = min(done, key=lambda r: r["score"])["origin"] if done else ""
+            worst_row = min(done, key=lambda r: r["score"]) if done else None
+            worst = br.host_label(worst_row["origin"]) if worst_row else ""
+            worst_score = int(worst_row["score"]) if worst_row else 0
+            pages_checked = sum(int(r["pages"]) for r in rows)
             task_total = sum(len(t) for t in tasks_by_site.values())
             label_now = br.run_label(store, run_id)
         finally:
@@ -119,15 +122,17 @@ async def audit_sites(ctx, params: AuditSitesParams) -> ActionResult:
             kind="seo_run",
             run_id=run_id,
             label=label_now,
-            site_count=len(rows),
-            finished=True,
+            sites_total=len(rows),
+            sites_done=len(done),
+            sites_failed=len(failed),
+            pages_checked=pages_checked,
             findings_total=findings_total,
+            tasks_total=task_total,
             critical=counts["critical"],
             high=counts["high"],
-            medium=counts["medium"],
-            low=counts["low"],
-            average_score=avg,
             worst_site=worst,
+            worst_score=worst_score,
+            finished=True,
         )
 
         parts = [
@@ -162,10 +167,10 @@ async def audit_sites(ctx, params: AuditSitesParams) -> ActionResult:
         id="pending",
         title=f"Аудит запущен: сайтов {len(origins)}",
         kind="seo_run_started",
-        site_count=len(origins),
+        sites_count=len(origins),
+        sites=[br.host_label(o) for o in origins],
         max_pages=params.max_pages,
         estimate=estimate,
-        next_step="Итог придёт отдельным сообщением. Чат свободен.",
     )
     return ActionResult.success(
         started,
@@ -228,7 +233,8 @@ async def resume_audit(ctx, params: ResumeAuditParams) -> ActionResult:
             rows, tasks_by_site = br.site_rows(store2, run_id)
             done = [r for r in rows if r["state"] == "done"]
             findings_total = sum(len(r["findings"]) for r in rows)
-            avg = int(sum(r["score"] for r in done) / len(done)) if done else 0
+            done_pages = sum(int(r["pages"]) for r in rows)
+            task_total = sum(len(t) for t in tasks_by_site.values())
         finally:
             store2.close()
 
@@ -237,10 +243,13 @@ async def resume_audit(ctx, params: ResumeAuditParams) -> ActionResult:
             title=f"Аудит #{run_id} продолжен",
             kind="seo_run",
             run_id=run_id,
-            site_count=len(rows),
-            finished=True,
+            sites_total=len(rows),
+            sites_done=len(done),
+            sites_failed=len(rows) - len(done),
+            pages_checked=done_pages,
             findings_total=findings_total,
-            average_score=avg,
+            tasks_total=task_total,
+            finished=True,
         )
         return ActionResult.success(
             summary,
@@ -249,10 +258,14 @@ async def resume_audit(ctx, params: ResumeAuditParams) -> ActionResult:
             refresh_panels=["seo", "seo_nav"],
         )
 
+    # Корутину создаём ОДИН раз: если хука нет, дожидаемся именно её. Иначе
+    # `await work()` во втором вызове породил бы вторую корутину, а первая
+    # осталась бы неожидаемой — Python предупредил бы, а работа потерялась.
+    coro = work()
     try:
-        await ctx.background_task(work(), long_running=True, name="seo-resume")
-    except RuntimeError:
-        return await work()
+        await ctx.background_task(coro, long_running=True, name="seo-resume")
+    except (RuntimeError, AttributeError):
+        return await coro
 
     return ActionResult.success(
         RunStarted(
@@ -260,7 +273,7 @@ async def resume_audit(ctx, params: ResumeAuditParams) -> ActionResult:
             title=f"Прогон #{run_id} продолжается",
             kind="seo_run_started",
             run_id=run_id,
-            next_step="Итог придёт отдельным сообщением.",
+            resumed=True,
         ),
         f"Продолжаю прогон #{run_id} с места остановки. Пришлю итог.",
     )
