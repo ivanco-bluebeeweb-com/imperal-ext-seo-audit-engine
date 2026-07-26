@@ -194,3 +194,169 @@ def test_no_handler_invents_a_field_the_entity_does_not_declare():
                         f"— поле не объявлено")
 
     assert not problems, "обработчик заполняет несуществующие поля:\n" + "\n".join(problems)
+
+
+# --- главное действие: «Добавить сайт» ---------------------------------------
+
+def _buttons(node) -> list[str]:
+    """Подписи всех кнопок в дереве."""
+    return [(getattr(n, "props", {}) or {}).get("label") or ""
+            for n in _flatten(node) if n.type == "Button"]
+
+
+def _fake_load(result: dict):
+    """Подменить чтение портфеля — панель не должна ходить в хранилище."""
+    async def loader(ctx, min_severity: str = "medium"):
+        return result
+    return loader
+
+
+_STATES = {
+    "первый запуск": {"first_run": True, "rows": []},
+    "сбой чтения": {"problem": "Не удалось прочитать результаты", "rows": []},
+    "есть данные": {
+        "run_id": 2, "label": "", "tasks_by_site": {},
+        "rows": [{"origin": "https://climtec.md", "state": "done", "score": 87,
+                  "pages": 12, "tasks": 3, "top_issue": "Кеш устарел",
+                  "by_severity": {"high": 1}, "rules": ["cache.serving_stale"]}],
+    },
+}
+
+
+@pytest.mark.parametrize("state", list(_STATES))
+async def test_add_site_button_is_always_in_the_sidebar(ctx, monkeypatch, state):
+    """«Добавить сайт» обязана быть в сайдбаре в ЛЮБОМ состоянии.
+
+    Раньше сайдбар предлагал только «Открыть портфель» и «Задачи» — добавить
+    новый сайт было неоткуда, а при сбое чтения он вырождался в строку
+    «Результаты недоступны» вообще без действий. То есть ровно в двух
+    состояниях, где помощь нужнее всего (ничего ещё нет / всё сломалось),
+    приложение не давало сделать главное.
+
+    Поэтому кнопка собирается ДО чтения данных и вне всяких ветвлений, а этот
+    тест перебирает все три состояния и падает, если она где-то исчезла.
+    """
+    monkeypatch.setattr(panels, "_load", _fake_load(_STATES[state]))
+
+    labels = _buttons(await panels.seo_nav(ctx))
+
+    assert any("Добавить сайт" in lbl for lbl in labels), \
+        f"в состоянии «{state}» кнопки нет; есть только: {labels}"
+
+
+@pytest.mark.parametrize("state", list(_STATES))
+async def test_add_view_opens_a_real_form_in_every_state(ctx, monkeypatch, state):
+    """Кнопка обязана открывать форму, а не проваливаться в «пусто».
+
+    view=\"add\" обрабатывается ПЕРВЫМ, до проверок на пустоту и до баннера
+    ошибки: форма ввода домена не зависит от прошлых результатов.
+    """
+    monkeypatch.setattr(panels, "_load", _fake_load(_STATES[state]))
+
+    tree = await panels.seo_center(ctx, view="add")
+
+    assert any(n.type == "Form" for n in _flatten(tree)), \
+        f"в состоянии «{state}» экран добавления без формы"
+
+
+def test_the_add_form_submits_to_a_function_this_extension_owns():
+    """Форма должна звать функцию ЭТОГО расширения, с верным именем поля.
+
+    `action=` панельной формы резолвится против функций РЕНДЕРЯЩЕГО расширения.
+    Ссылка на чужую функцию падает уже на клике («Function not found»), а
+    неверное имя поля тихо не донесёт значение до инструмента — оба случая
+    видны только в живой панели, если не проверить здесь.
+    """
+    import main  # noqa: F401
+    from app import chat
+
+    tree = panels._add_view({"rows": []})
+    forms = [n for n in _flatten(tree) if n.type == "Form"]
+    assert forms, "экран добавления обязан содержать форму"
+
+    action = (forms[0].props or {}).get("action")
+    functions = getattr(chat, "_functions", None) or {}
+    assert action in functions, \
+        f"форма ссылается на '{action}', которой нет среди {sorted(functions)}"
+
+    # Имя поля должно совпадать с параметром инструмента.
+    names = {(n.props or {}).get("param_name")
+             for n in _flatten(forms[0]) if n.type in ("Input", "Password")}
+    from models import AuditSitesParams
+    assert names <= set(AuditSitesParams.model_fields), \
+        f"поля {names} не существуют в параметрах audit_sites"
+
+
+# --- раскладка --------------------------------------------------------------
+
+def test_stacks_use_the_direction_values_the_sdk_understands():
+    """direction принимает только \"v\"/\"h\" — не \"vertical\".
+
+    РЕАЛЬНЫЙ БАГ: все семь экранов передавали direction=\"vertical\". SDK
+    объявляет значение по умолчанию \"v\", а Row/Column внутри SDK используют
+    строго \"h\"/\"v\". Значение уходит во фронтенд без валидации — ни SDK, ни
+    `imperal validate` не возражают, поэтому вертикальная раскладка ломалась
+    молча, а поймать это можно только сверкой значений.
+    """
+    import main  # noqa: F401
+
+    trees = [panels._first_run(), panels._banner("тест"),
+             panels._add_view({"rows": []}),
+             panels._portfolio_view(_STATES["есть данные"]),
+             panels._findings_view(_STATES["есть данные"])]
+
+    for tree in trees:
+        for node in _flatten(tree):
+            if node.type != "Stack":
+                continue
+            direction = (node.props or {}).get("direction", "v")
+            assert direction in ("v", "h"), \
+                f"недопустимое direction={direction!r} — SDK знает только 'v'/'h'"
+
+
+def test_every_ui_call_matches_the_sdk_signature():
+    """Ни один вызов ui.* не должен передавать несуществующий аргумент.
+
+    Этот тест — обобщение ДВУХ уже случившихся багов:
+      * ui.Header(title=...) — на самом деле первый аргумент называется `text`;
+        панель падала с TypeError при рендере;
+      * direction="vertical" — SDK знает только "v"/"h", значение уходило во
+        фронтенд без валидации и раскладка ломалась молча.
+
+    Общее у них то, что `imperal validate` их не видит: он проверяет контракт
+    расширения, а не соответствие вызовов ui.* сигнатурам SDK. Поэтому сверяем
+    сами — по фактической сигнатуре, а не по памяти.
+    """
+    import ast
+    import inspect
+    import pathlib
+
+    from imperal_sdk import ui
+
+    problems: list[str] = []
+    source = pathlib.Path(__file__).resolve().parent.parent / "panels.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "ui"):
+            continue
+
+        fn = getattr(ui, node.func.attr, None)
+        if fn is None:
+            problems.append(f"строка {node.lineno}: ui.{node.func.attr} не существует")
+            continue
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            continue
+        if any(p.kind == p.VAR_KEYWORD for p in params.values()):
+            continue
+        for kw in node.keywords:
+            if kw.arg and kw.arg not in params:
+                problems.append(
+                    f"строка {node.lineno}: ui.{node.func.attr}(...{kw.arg}=...) "
+                    f"— такого аргумента нет")
+
+    assert not problems, "вызовы ui.* расходятся с SDK:\n  " + "\n  ".join(problems)

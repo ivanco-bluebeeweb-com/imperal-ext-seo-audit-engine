@@ -44,8 +44,8 @@ SEV_LABEL = {
 # Текст, который объясняет пустой экран новичку. Пустота у нас — не ошибка,
 # а состояние «ещё не запускали», и она обязана содержать следующий шаг.
 FIRST_RUN = (
-    "Аудитов ещё не было. Напишите в чате, например: «проверь climtec.md» — "
-    "или «проверь climtec.md и ksrenovationgroup.com». Аудит только читает "
+    "Аудитов ещё не было. Нажмите «Добавить сайт» и введите домен — например "
+    "climtec.md. Или скажите в чате: «проверь climtec.md». Аудит только читает "
     "сайты и ничего на них не меняет."
 )
 
@@ -95,18 +95,31 @@ async def _load(ctx, min_severity: str = "medium") -> dict[str, Any]:
 
 
 def _banner(text: str) -> Any:
-    """Баннер с кнопкой обновления — вместо пустого экрана."""
-    return ui.Stack(direction="vertical", gap=3, children=[
+    """Баннер вместо пустого экрана — и всегда с выходом к действию.
+
+    Кнопка «Добавить сайт» есть и здесь: сбой ЧТЕНИЯ прошлых результатов не
+    мешает запустить новый аудит, и оставлять пользователя в тупике с одной
+    кнопкой «обновить» было бы неправильно.
+    """
+    return ui.Stack(direction="v", gap=3, children=[
         ui.Alert(type="error", message=text),
-        ui.Button(label="Обновить", on_click=ui.Call("__panel__seo"),
-                  variant="secondary"),
+        ui.Row(gap=2, children=[
+            ui.Button(label="+ Добавить сайт",
+                      on_click=ui.Call("__panel__seo", view="add")),
+            ui.Button(label="Обновить", variant="secondary",
+                      on_click=ui.Call("__panel__seo")),
+        ]),
     ])
 
 
 def _first_run() -> Any:
-    return ui.Stack(direction="vertical", gap=3, children=[
+    """Первый запуск: объяснение и сразу способ начать."""
+    return ui.Stack(direction="v", gap=3, children=[
         ui.Header("SEO-аудит портфеля", subtitle="Пока пусто"),
-        ui.Empty(message=FIRST_RUN),
+        ui.Empty(message=FIRST_RUN,
+                 action=ui.Call("__panel__seo", view="add")),
+        ui.Button(label="+ Добавить сайт",
+                  on_click=ui.Call("__panel__seo", view="add")),
     ])
 
 
@@ -156,14 +169,16 @@ def _portfolio_view(data: dict[str, Any]) -> Any:
         ))
 
     children.append(ui.Row(gap=2, children=[
-        ui.Button(label="Находки",
+        ui.Button(label="+ Добавить сайт",
+                  on_click=ui.Call("__panel__seo", view="add")),
+        ui.Button(label="Находки", variant="secondary",
                   on_click=ui.Call("__panel__seo", view="findings")),
-        ui.Button(label="Задачи",
+        ui.Button(label="Задачи", variant="secondary",
                   on_click=ui.Call("__panel__seo", view="tasks")),
         ui.Button(label="Обновить", variant="ghost",
                   on_click=ui.Call("__panel__seo")),
     ]))
-    return ui.Stack(direction="vertical", gap=3, children=children)
+    return ui.Stack(direction="v", gap=3, children=children)
 
 
 def _findings_view(data: dict[str, Any]) -> Any:
@@ -189,7 +204,7 @@ def _findings_view(data: dict[str, Any]) -> Any:
             + x["by_severity"].get("high", 0)))],
     )
 
-    return ui.Stack(direction="vertical", gap=3, children=[
+    return ui.Stack(direction="v", gap=3, children=[
         ui.Header("Находки по уровням",
                   subtitle="Подробности по сайту — спросите в чате: "
                            "«покажи находки climtec.md»"),
@@ -213,7 +228,7 @@ def _tasks_view(data: dict[str, Any]) -> Any:
                                 pair[0], pair[1].rule))
 
     if not flat:
-        return ui.Stack(direction="vertical", gap=3, children=[
+        return ui.Stack(direction="v", gap=3, children=[
             ui.Header("Задачи", subtitle="Пока нечего делать"),
             ui.Empty(message="Задач выше порога «средне» нет — по этим сайтам "
                              "критичных работ не найдено."),
@@ -235,7 +250,7 @@ def _tasks_view(data: dict[str, Any]) -> Any:
         } for origin, t in flat[:60]],
     )
 
-    return ui.Stack(direction="vertical", gap=3, children=[
+    return ui.Stack(direction="v", gap=3, children=[
         ui.Header("Задачи к работе",
                   subtitle=f"Всего: {len(flat)} · одна задача = один дефект "
                            f"на одном сайте, со списком страниц внутри"),
@@ -250,6 +265,52 @@ def _tasks_view(data: dict[str, Any]) -> Any:
                       on_click=ui.Call("__panel__seo", view="findings")),
         ]),
     ])
+
+
+def _add_view(data: dict[str, Any]) -> Any:
+    """Экран добавления сайта — реальная форма, а не подсказка «напишите в чат».
+
+    Форма сабмитится прямо в `audit_sites` этого же расширения. Так можно,
+    потому что `action=` панельной формы резолвится против функций РЕНДЕРЯЩЕГО
+    расширения — проверено на Notion Connector, где попытка позвать чужую
+    функцию падала на клике с «Function not found». `audit_sites` наш, поэтому
+    кнопка действительно запускает аудит.
+
+    Поле называется `sites` — ровно как параметр инструмента, иначе значение до
+    него не дойдёт. Домены разбирает `parse_sites`, поэтому здесь можно вводить
+    и один сайт, и список через запятую, со схемой или без.
+    """
+    known = [br.host_label(r["origin"]) for r in data.get("rows", [])]
+
+    children: list[Any] = [
+        ui.Header("Добавить сайт в аудит",
+                  subtitle="Домен без схемы — например climtec.md. "
+                           "Несколько — через запятую."),
+        ui.Form(
+            action="audit_sites",
+            submit_label="Проверить",
+            children=[
+                ui.Input(placeholder="climtec.md, ksrenovationgroup.com",
+                         param_name="sites"),
+            ],
+        ),
+        ui.Text(content="Аудит только читает сайты и ничего на них не меняет. "
+                        "Обход идёт в фоне: чат остаётся свободным, итог придёт "
+                        "отдельным сообщением.",
+                variant="caption"),
+    ]
+
+    # Что уже в портфеле — чтобы не гонять один сайт дважды по чужому серверу.
+    if known:
+        children.append(ui.Text(
+            content="Уже в портфеле: " + ", ".join(known[:12]),
+            variant="caption"))
+
+    children.append(ui.Row(gap=2, children=[
+        ui.Button(label="К портфелю", variant="secondary",
+                  on_click=ui.Call("__panel__seo")),
+    ]))
+    return ui.Stack(direction="v", gap=3, children=children)
 
 
 @ext.panel("seo", slot="center", title="SEO-аудит", icon="Search",
@@ -267,6 +328,14 @@ async def seo_center(ctx, **kwargs):
     view = str(kwargs.get("view") or "").strip().lower()
     data = await _load(ctx)
 
+    # «Добавить сайт» обрабатывается ПЕРВЫМ — до проверок на пустоту и до
+    # баннера об ошибке. Иначе главное действие приложения было бы недоступно
+    # ровно в двух состояниях, где оно нужнее всего: на первом запуске (когда
+    # добавлять сайты и надо) и при сбое чтения базы (когда пользователю нечем
+    # себе помочь). Форма ввода не зависит от прошлых результатов.
+    if view == "add":
+        return _add_view(data if not data.get("problem") else {})
+
     if data.get("problem"):
         return _banner(data["problem"])
     if data.get("first_run"):
@@ -282,30 +351,54 @@ async def seo_center(ctx, **kwargs):
 @ext.panel("seo_nav", slot="left", title="SEO-аудит", icon="Search",
            refresh="manual")
 async def seo_nav(ctx, **kwargs):
-    """Боковая запись: состояние портфеля одной строкой и вход внутрь.
+    """Боковая запись: добавить сайт, состояние портфеля, вход внутрь.
+
+    ГЛАВНОЕ ДЕЙСТВИЕ ВСЕГДА ВИДНО.
+
+    «Добавить сайт» — то, ради чего вообще открывают это приложение, поэтому
+    кнопка стоит ПЕРВОЙ и собирается ВНЕ всяких условий: до любого чтения базы,
+    до любой ветки состояния. Раньше сайдбар предлагал только «Открыть портфель»
+    и «Задачи» — то есть новый сайт добавить было НЕОТКУДА, а при сбое чтения
+    сайдбар вырождался в строку «Результаты недоступны» вообще без действий.
+
+    Это не косметика, а инвариант: кнопка не должна зависеть от того, читается
+    ли база. Именно в состоянии «всё сломалось» пользователю нужнее всего
+    возможность что-то сделать. Ветвление ниже влияет ТОЛЬКО на подпись
+    состояния и на вторичные кнопки — на главное действие никогда.
 
     SKETCH -- left nav
       ui.Stack (v, gap=2)
-        ui.Text(content=<состояние>, variant="body")
-        ui.Button("Открыть портфель", full_width=True)
+        ui.Button("+ Добавить сайт", full_width=True)   # ВСЕГДА, первым
+        ui.Text(content=<состояние>, variant="caption")
+        ui.Button("Открыть портфель", full_width=True)  # если есть что открывать
         ui.Button("Задачи", variant="ghost", full_width=True)
     """
+    # Главное действие. Собирается ДО чтения данных — сознательно.
+    children = [
+        ui.Button(label="+ Добавить сайт", full_width=True,
+                  on_click=ui.Call("__panel__seo", view="add")),
+    ]
+
     data = await _load(ctx)
 
     if data.get("problem"):
         state = "Результаты недоступны"
+        extra: list[Any] = []
     elif data.get("first_run"):
         state = "Аудитов ещё не было"
+        extra = []
     else:
         rows = data["rows"]
         done = [r for r in rows if r["state"] == "done"]
         tasks = sum(r["tasks"] for r in done)
         state = f"Сайтов: {len(done)} · задач: {tasks}"
+        extra = [
+            ui.Button(label="Открыть портфель", variant="secondary",
+                      full_width=True, on_click=ui.Call("__panel__seo")),
+            ui.Button(label="Задачи", variant="ghost", full_width=True,
+                      on_click=ui.Call("__panel__seo", view="tasks")),
+        ]
 
-    return ui.Stack(direction="vertical", gap=2, children=[
-        ui.Text(content=state, variant="body"),
-        ui.Button(label="Открыть портфель", full_width=True,
-                  on_click=ui.Call("__panel__seo")),
-        ui.Button(label="Задачи", variant="ghost", full_width=True,
-                  on_click=ui.Call("__panel__seo", view="tasks")),
-    ])
+    children.append(ui.Text(content=state, variant="caption"))
+    children.extend(extra)
+    return ui.Stack(direction="v", gap=2, children=children)
