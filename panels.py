@@ -50,6 +50,40 @@ FIRST_RUN = (
 )
 
 
+async def _load_site(ctx, host: str) -> dict[str, Any]:
+    """Прочитать всё про ОДИН сайт. Точечно, без обхода портфеля."""
+    try:
+        path = await br.download_db(ctx)
+    except Exception as exc:
+        await ctx.log(f"panel: storage read failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось получить данные сайта. Попробуйте обновить."}
+
+    if not path:
+        return {"first_run": True}
+
+    try:
+        store = br.open_store(path)
+    except Exception as exc:
+        await ctx.log(f"panel: db unreadable: {type(exc).__name__}", "error")
+        return {"problem": "Данные аудита не читаются. Запустите аудит заново."}
+
+    try:
+        detail = br.site_detail(store, host)
+        if detail is None:
+            # Не ошибка: сайт мог быть удалён из портфеля или домен набран
+            # руками с опечаткой. Человеку нужен путь назад, а не «сбой».
+            return {"missing": br.host_label(host) or host}
+        return {"detail": detail}
+    except Exception as exc:
+        await ctx.log(f"panel: site detail failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось собрать данные сайта. Попробуйте обновить."}
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+
+
 def _int_param(raw: Any, default: int = 0) -> int:
     """Целое из параметра панели — молча и безопасно.
 
@@ -150,25 +184,34 @@ async def _load_sites(ctx, *, query: str = "", offset: int = 0,
             pass
 
 
-def _banner(text: str) -> Any:
+def _banner(text: str, *, kind: str = "error", back_to_sites: bool = False) -> Any:
     """Баннер вместо пустого экрана — и всегда с выходом к действию.
 
     Кнопка «Добавить сайт» есть и здесь: сбой ЧТЕНИЯ прошлых результатов не
     мешает запустить новый аудит, и оставлять пользователя в тупике с одной
     кнопкой «обновить» было бы неправильно.
+
+    `kind` отличает СБОЙ от простого «этого нет». Красный alert на «сайт не
+    найден» врёт: ничего не сломалось, домен просто ещё не проверялся.
+    `back_to_sites` возвращает в список — если человек пришёл со страницы
+    сайта, ему нужно назад именно туда, откуда он нажал.
     """
+    actions = [
+        ui.Button(label="+ Добавить сайт",
+                  on_click=ui.Call("__panel__seo", view="add")),
+    ]
+    if back_to_sites:
+        actions.append(ui.Button(label="← Все сайты", variant="secondary",
+                                 on_click=ui.Call("__panel__seo", view="sites")))
+    actions.append(ui.Button(label="Обновить", variant="ghost",
+                             on_click=ui.Call("__panel__seo")))
+
     return ui.Stack(direction="v", gap=3, children=[
-        ui.Alert(type="error", message=text),
-        ui.Row(gap=2, children=[
-            ui.Button(label="+ Добавить сайт",
-                      on_click=ui.Call("__panel__seo", view="add")),
-            ui.Button(label="Обновить", variant="secondary",
-                      on_click=ui.Call("__panel__seo")),
-        ]),
+        ui.Alert(type=kind, message=text),
+        ui.Row(gap=2, children=actions),
     ])
 
 
-# Подписи состояний сайта. Английские коды движка в UI не место.
 # ТОЛЬКО цвета. Сами подписи живут в bridge.state_label — один источник на
 # панель и чат, иначе однажды поправишь в одном месте и получишь «проверен» в
 # панели и «done» в чате про один и тот же сайт.
@@ -226,9 +269,16 @@ def _sites_view(data: dict[str, Any]) -> Any:
             subtitle=" · ".join(bits),
             meta=br.when_label(row["last_seen"]),
             badge=ui.Badge(label=label, color=colour),
-            # Повторная проверка одного сайта — самое частое действие в списке.
-            actions=[{"icon": "RefreshCw",
-                      "on_click": ui.Call("audit_sites", sites=host)}],
+            # Клик по строке открывает страницу сайта. Кнопка «Подробнее»
+            # дублирует его намеренно: клик по строке — догадка, а видимая
+            # кнопка сообщает, что деталь вообще существует.
+            on_click=ui.Call("__panel__seo", view="site", site=host),
+            actions=[
+                {"icon": "ArrowRight", "label": "Подробнее",
+                 "on_click": ui.Call("__panel__seo", view="site", site=host)},
+                {"icon": "RefreshCw", "label": "Перепроверить",
+                 "on_click": ui.Call("audit_sites", sites=host)},
+            ],
         ))
 
     shown_from = offset + 1 if items else 0
@@ -353,6 +403,151 @@ def _portfolio_view(data: dict[str, Any]) -> Any:
         ui.Button(label="Обновить", variant="ghost",
                   on_click=ui.Call("__panel__seo")),
     ]))
+    return ui.Stack(direction="v", gap=3, children=children)
+
+
+SEVERITY_LABEL = {
+    "critical": ("критично", "red"),
+    "high": ("важно", "orange"),
+    "medium": ("средне", "yellow"),
+    "low": ("гигиена", "gray"),
+    "info": ("к сведению", "gray"),
+}
+
+
+def _site_view(data: dict[str, Any]) -> Any:
+    """Страница ОДНОГО сайта: всё, что аудит про него поднял.
+
+    Порядок блоков — по вопросам, которые человек задаёт в этом порядке:
+      1. как дела вообще        -> оценка, страницы, когда проверяли
+      2. что делать            -> задачи (одна задача = одна операция)
+      3. что именно не так     -> находки по слоям, с адресами страниц
+      4. стало лучше или хуже  -> история прошлых проверок
+    Сначала «что делать», потом «что не так»: список из сорока находок без
+    вывода бесполезен, а задача сразу говорит действие.
+
+    Находки сгруппированы по слоям, потому что слой отвечает «где болит» —
+    доступность, скорость, разметка. Плоский список читать невозможно, а по
+    слоям видно, что сайт живой, просто разметка хромает.
+
+    SKETCH -- view="site"
+      ui.Stack (v, gap=3)
+        ui.Header(<домен>, subtitle=<состояние · когда>)
+        ui.Stats -> Stat * 4              # оценка, страницы, задачи, находки
+        ui.Alert                          # только если сайт не открылся
+        ui.Section("Что делать") -> ui.List(задачи, expandable)
+        ui.Section("Что не так") -> Accordion по слоям
+        ui.Section("История") -> ui.Timeline
+        ui.Row -> Назад к списку / Перепроверить
+    """
+    host = data["host"]
+    score = int(data.get("score") or 0)
+    pages = int(data.get("pages") or 0)
+    tasks = data.get("tasks") or []
+    findings = data.get("findings") or []
+    by_sev = data.get("by_severity") or {}
+
+    children: list[Any] = [
+        # «проверен 19 ч назад» рядом с «не открылся» противоречит само себе:
+        # попытка была, а проверки как раз не случилось. Нейтральная
+        # «последняя проверка» верна в обоих случаях.
+        ui.Header(host,
+                  subtitle=f"{br.state_label(data.get('state'))} · "
+                           f"последняя проверка: {data.get('checked') or '—'}"),
+        ui.Stats(children=[
+            ui.Stat(label="Оценка", value=f"{score}/100"),
+            ui.Stat(label="Страниц", value=str(pages)),
+            ui.Stat(label="Задач", value=str(len(tasks))),
+            ui.Stat(label="Находок", value=str(len(findings))),
+        ]),
+    ]
+
+    # Сайт не открылся — это главное, что нужно сказать, и сказать первым.
+    if data.get("error"):
+        children.append(ui.Alert(
+            f"Сайт не открылся: {data['error']}", type="error"))
+
+    # --- что делать -----------------------------------------------------------
+    if tasks:
+        task_items = []
+        for t in tasks:
+            label, colour = SEVERITY_LABEL.get(
+                t.severity, (t.severity or "—", "gray"))
+            urls = list(getattr(t, "urls", []) or [])
+            bits = [label]
+            if t.count:
+                bits.append(f"страниц: {t.count}")
+            task_items.append(ui.ListItem(
+                id=f"task-{t.rule}",
+                title=t.title,
+                subtitle=" · ".join(bits),
+                badge=ui.Badge(label=label, color=colour),
+                # Адреса прячем под раскрытие: их бывает десятки, и в свёрнутом
+                # виде список задач остаётся читаемым.
+                expandable=bool(urls or t.body),
+                expanded_content=([ui.Text(content=t.body)] if t.body else []) + (
+                    [ui.Text(content="Страницы:", variant="caption")] +
+                    [ui.Link(label=u, href=u) for u in urls[:20]] +
+                    ([ui.Text(content=f"…и ещё {len(urls) - 20}",
+                              variant="caption")] if len(urls) > 20 else [])
+                    if urls else []),
+            ))
+        children.append(ui.Section(
+            title="Что делать",
+            children=[ui.List(items=task_items)],
+        ))
+
+    # --- что именно не так ----------------------------------------------------
+    if findings:
+        layer_blocks = []
+        for _layer, name, items in br.findings_by_layer(findings):
+            lines = []
+            for f in items:
+                label, colour = SEVERITY_LABEL.get(
+                    f.get("severity"), (f.get("severity") or "—", "gray"))
+                url = f.get("url") or ""
+                lines.append(ui.ListItem(
+                    id=f"f-{f.get('id')}",
+                    title=f.get("message") or f.get("rule") or "—",
+                    subtitle=(f.get("detail") or "")[:200],
+                    meta=br.host_label(url) if url else "весь сайт",
+                    badge=ui.Badge(label=label, color=colour),
+                ))
+            layer_blocks.append({
+                "id": f"layer-{_layer}",
+                "title": f"{name} ({len(items)})",
+                "children": [ui.List(items=lines)],
+            })
+        children.append(ui.Section(
+            title="Что не так",
+            children=[ui.Accordion(sections=layer_blocks)],
+        ))
+
+    # --- стало лучше или хуже -------------------------------------------------
+    history = data.get("history") or []
+    if len(history) > 1:
+        children.append(ui.Section(
+            title="История проверок",
+            children=[ui.Timeline(items=[{
+                "title": f"{h['score']}/100 · {h['pages']} стр.",
+                "description": (h["run_label"] or f"прогон #{h['run_id']}"),
+                "time": h["when"],
+            } for h in history])],
+        ))
+
+    if not tasks and not findings:
+        children.append(ui.Alert(
+            "Проблем не найдено — сайт в порядке.", type="success"))
+
+    children.append(ui.Row(gap=2, children=[
+        ui.Button(label="← Все сайты",
+                  on_click=ui.Call("__panel__seo", view="sites")),
+        ui.Button(label="Перепроверить", variant="secondary",
+                  on_click=ui.Call("audit_sites", sites=host)),
+        ui.Button(label="Отчёт", variant="ghost",
+                  on_click=ui.Call("get_report", site=host)),
+    ]))
+
     return ui.Stack(direction="v", gap=3, children=children)
 
 
@@ -522,6 +717,24 @@ async def seo_center(ctx, **kwargs):
             "known": [r["host"] for r in (known.get("sites") or [])],
             "total": known.get("total") or 0,
         })
+
+    if view == "site":
+        host = str(kwargs.get("site") or kwargs.get("host") or "").strip()
+        if not host:
+            return _banner("Не указан сайт. Откройте список и выберите сайт.")
+        site_data = await _load_site(ctx, host)
+        if site_data.get("problem"):
+            return _banner(site_data["problem"])
+        if site_data.get("first_run"):
+            return _first_run()
+        if site_data.get("missing"):
+            # Не сбой, а состояние: домен мог не попасть в аудит или быть
+            # набран с опечаткой. Поэтому спокойный тон и путь НАЗАД В СПИСОК.
+            return _banner(
+                f"Сайт «{site_data['missing']}» в результатах аудита не найден — "
+                f"возможно, он ещё не проверялся.",
+                kind="info", back_to_sites=True)
+        return _site_view(site_data["detail"])
 
     if view == "sites":
         sites_data = await _load_sites(

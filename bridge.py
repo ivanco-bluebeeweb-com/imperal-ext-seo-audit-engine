@@ -536,3 +536,108 @@ def state_label(state: str) -> str:
     """Человеческая подпись состояния. Неизвестное — как есть, без выдумок."""
     key = (state or "").strip().lower()
     return STATE_LABELS.get(key, key or "—")
+
+
+# --- всё про ОДИН сайт -------------------------------------------------------
+
+def site_detail(store: Store, host: str, *, min_severity: str = "medium",
+                ) -> dict[str, Any] | None:
+    """Полная картина одного сайта. None — если такого домена в базе нет.
+
+    Точечно по одному домену, а НЕ через `site_rows`: та перебирает все сайты
+    прогона, поднимая находки и строя задачи для каждого. На портфеле из 500
+    доменов это ~460 КБ, чтобы показать один сайт. Здесь берётся ровно одна
+    запись — самая свежая для этого домена.
+
+    Домен ищется нормализованным (без схемы, слэшей и www) по той же причине,
+    что и в списке: одна площадка могла попасть в базу как `https://climtec.md/`
+    и как `https:///climtec.md`. Пользователь нажал на ОДНУ строку и обязан
+    получить эту строку, а не «сайт не найден» из-за формы записи.
+    """
+    needle = host_label(host)
+    if not needle:
+        return None
+
+    row = store.db.execute(
+        f"""
+        SELECT s.id AS site_id, s.origin AS origin, s.state AS state,
+               s.error AS error, s.run_id AS run_id, r.started_at AS started_at,
+               r.label AS run_label
+        FROM sites s
+        JOIN runs r ON r.id = s.run_id
+        WHERE {_SQL_HOST} = ?
+        ORDER BY r.started_at DESC, s.id DESC
+        LIMIT 1
+        """,
+        [needle],
+    ).fetchone()
+    if row is None:
+        return None
+
+    site_id = row["site_id"]
+    findings = [dict(f) for f in store.findings(site_id)]
+    pages = store.count_pages(site_id)
+    tasks = build_tasks(row["origin"], findings, min_severity=min_severity)
+
+    by_sev: dict[str, int] = {}
+    for f in findings:
+        by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+
+    # История: тот же домен в других прогонах — видно, стало лучше или хуже.
+    history: list[dict[str, Any]] = []
+    for h in store.db.execute(
+        f"""
+        SELECT s.id AS site_id, s.state AS state, r.started_at AS started_at,
+               r.id AS run_id, r.label AS run_label
+        FROM sites s
+        JOIN runs r ON r.id = s.run_id
+        WHERE {_SQL_HOST} = ?
+        ORDER BY r.started_at DESC, s.id DESC
+        LIMIT 12
+        """,
+        [needle],
+    ):
+        h_pages = store.count_pages(h["site_id"])
+        history.append({
+            "run_id": h["run_id"],
+            "run_label": h["run_label"] or "",
+            "state": h["state"],
+            "pages": h_pages,
+            "score": store.site_score(h["site_id"], h_pages),
+            "when": when_label(h["started_at"]),
+        })
+
+    return {
+        "host": needle,
+        "origin": row["origin"],
+        "state": row["state"],
+        "error": row["error"] or "",
+        "run_id": row["run_id"],
+        "run_label": row["run_label"] or "",
+        "checked": when_label(row["started_at"]),
+        "pages": pages,
+        "score": store.site_score(site_id, pages),
+        "findings": findings,
+        "tasks": tasks,
+        "by_severity": by_sev,
+        "history": history,
+    }
+
+
+def findings_by_layer(findings: list[dict[str, Any]]) -> list[tuple[int, str, list[dict[str, Any]]]]:
+    """Находки, сгруппированные по слою проверки, слои — по порядку.
+
+    Слой отвечает на вопрос «где болит»: доступность, скорость, разметка. Плоский
+    список из сорока находок читать невозможно, а по слоям видно, что сайт
+    вообще-то живой, просто разметка хромает.
+    """
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for f in findings:
+        groups.setdefault(int(f.get("layer") or 0), []).append(f)
+
+    out: list[tuple[int, str, list[dict[str, Any]]]] = []
+    for layer in sorted(groups):
+        items = sorted(groups[layer],
+                       key=lambda x: severity_rank(x.get("severity", "")))
+        out.append((layer, layer_name(layer), items))
+    return out

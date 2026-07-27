@@ -395,3 +395,141 @@ def test_the_same_site_written_differently_is_one_row(tmp_path):
         assert br.connected_sites(store, query="climtec")[1] == 1
     finally:
         store.close()
+
+
+# --- страница одного сайта ---------------------------------------------------
+
+async def test_the_site_page_opens_from_the_list(ctx, monkeypatch, big_db):
+    """Строка списка ведёт на страницу сайта, и та страница собирается.
+
+    Раньше список был тупиком: строка ничего не открывала, а экран находок сам
+    предлагал «спросите в чате» — то есть панель отправляла пользователя в чат
+    за тем, что должна показывать сама.
+    """
+    import panels
+
+    async def fake_download(_ctx):
+        return big_db
+
+    monkeypatch.setattr(panels.br, "download_db", fake_download)
+
+    listing = await panels.seo_center(ctx, view="sites")
+    items = [n for n in _walk(listing) if n.type == "ListItem"]
+    assert items, "в списке нет строк"
+
+    first = items[0].props
+    host = first["title"]
+
+    # строка кликается целиком И имеет явную кнопку — оба пути ведут на сайт
+    click = first.get("on_click")
+    assert click is not None, "строка списка ничего не открывает"
+    assert click.params["params"] == {"view": "site", "site": host}
+
+    labels = [a.get("label") for a in (first.get("actions") or [])]
+    assert "Подробнее" in labels, f"нет кнопки «Подробнее»: {labels}"
+
+    page = await panels.seo_center(ctx, view="site", site=host)
+    assert page.type == "Stack"
+    headers = [n for n in _walk(page) if n.type == "Header"]
+    assert headers and headers[0].props.get("text") == host
+
+    sections = [n.props.get("title") for n in _walk(page) if n.type == "Section"]
+    assert "Что делать" in sections, f"нет блока задач: {sections}"
+    assert "Что не так" in sections, f"нет блока находок: {sections}"
+
+    # выход назад в список обязателен: иначе страница сайта — новый тупик
+    buttons = [n.props.get("label") or "" for n in _walk(page) if n.type == "Button"]
+    assert any("Все сайты" in b for b in buttons), buttons
+
+
+async def test_the_site_page_does_not_read_the_whole_portfolio(
+        ctx, monkeypatch, big_db):
+    """Страница ОДНОГО сайта не имеет права готовить отчёт по всем 500.
+
+    `site_rows` перебирает все сайты прогона, поднимая находки и строя задачи
+    для каждого: ~460 КБ, чтобы показать один сайт. Проверяем ФАКТОМ вызова —
+    запрет через падающую заглушку здесь бесполезен, потому что загрузчик ловит
+    исключения и превращает их в мягкое «problem» (на этом я уже попадалась).
+    """
+    import panels
+
+    async def fake_download(_ctx):
+        return big_db
+
+    calls: list[str] = []
+    real = panels.br.site_rows
+
+    def counting(*args, **kwargs):
+        calls.append("site_rows")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(panels.br, "download_db", fake_download)
+    monkeypatch.setattr(panels.br, "site_rows", counting)
+
+    page = await panels.seo_center(ctx, view="site", site="site017.example")
+
+    assert page.type == "Stack"
+    assert calls == [], "страница сайта построила отчёт по всему портфелю"
+    assert _payload_kb(page) < 40, (
+        f"страница одного сайта весит {_payload_kb(page):.0f} КБ")
+
+
+@pytest.mark.parametrize("host", ["нетакого.example", "", "   ", "'; DROP TABLE sites;--"])
+async def test_unknown_site_explains_instead_of_breaking(
+        ctx, monkeypatch, big_db, host):
+    """Неизвестный или мусорный домен — спокойное объяснение и путь назад.
+
+    Домен приходит из URL панели, то есть его можно набрать руками. Это не
+    ошибка приложения, и красный «сбой» здесь врал бы: ничего не сломалось,
+    сайт просто не проверялся. Заодно проверяем, что параметр не исполняется
+    как SQL — он идёт в запрос только через привязку значений.
+    """
+    import panels
+
+    async def fake_download(_ctx):
+        return big_db
+
+    monkeypatch.setattr(panels.br, "download_db", fake_download)
+
+    page = await panels.seo_center(ctx, view="site", site=host)
+    assert page.type == "Stack"
+
+    buttons = [n.props.get("label") or "" for n in _walk(page) if n.type == "Button"]
+    assert any("сайт" in b.lower() for b in buttons), buttons
+
+    # таблица цела — SQL-инъекции не случилось
+    rows, total = br.connected_sites(_open(big_db))
+    assert total == SITES
+
+
+def _open(path: str):
+    import bridge as _br
+    return _br.open_store(path)
+
+
+def test_site_detail_finds_a_site_written_any_way(tmp_path):
+    """Клик по строке обязан открыть сайт независимо от формы записи origin.
+
+    Список группирует по нормализованному домену, поэтому строка «climtec.md»
+    может стоять за записью `https:///climtec.md`. Если деталь искала бы по
+    точному origin, клик по видимой строке давал бы «сайт не найден» — худший
+    вид поломки: пользователь нажал на то, что показали, и получил отказ.
+    """
+    from seoaudit.store import Store
+
+    store = Store(str(tmp_path / "odd.db"))
+    try:
+        run_id = store.create_run(label="кривой origin")
+        site_id = store.add_site(run_id, "https:///climtec.md")
+        store.set_site_state(site_id, "done")
+        store.finish_run(run_id)
+
+        rows, _total = br.connected_sites(store)
+        shown = rows[0]["host"]
+        assert shown == "climtec.md"
+
+        detail = br.site_detail(store, shown)
+        assert detail is not None, "клик по видимой строке не открыл сайт"
+        assert detail["host"] == "climtec.md"
+    finally:
+        store.close()
