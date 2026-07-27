@@ -15,15 +15,23 @@ import panels
 
 
 def _flatten(node):
-    """Обойти дерево UI. У компонентов дети лежат в props['children']."""
+    """Обойти дерево UI.
+
+    Дети лежат НЕ ТОЛЬКО в props['children']: у ui.List элементы живут в
+    props['items'], у ListItem раскрытое содержимое — в 'expanded_content'.
+    Обход только по 'children' молча проходит мимо целого списка и потом
+    «доказывает» пустоту там, где строки на самом деле есть. Я на это уже
+    попалась в тестах масштаба — здесь та же ловушка.
+    """
     yield node
     props = getattr(node, "props", None) or {}
-    kids = props.get("children") or []
-    if not isinstance(kids, (list, tuple)):
-        kids = [kids]
-    for kid in kids:
-        if hasattr(kid, "type"):
-            yield from _flatten(kid)
+    for key in ("children", "items", "expanded_content"):
+        kids = props.get(key) or []
+        if not isinstance(kids, (list, tuple)):
+            kids = [kids]
+        for kid in kids:
+            if hasattr(kid, "type"):
+                yield from _flatten(kid)
 
 
 def _dump(node) -> str:

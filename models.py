@@ -86,6 +86,24 @@ class ListRunsParams(BaseModel):
     limit: int = Field(10, ge=1, le=50, description="Сколько прогонов вернуть")
 
 
+class ListConnectedParams(BaseModel):
+    """Что показать в списке подключённых сайтов.
+
+    Есть `query` и постраничность, потому что портфель бывает на сотни доменов:
+    вываливать их в чат одним куском бессмысленно — читать это невозможно, а
+    ответ раздувается. По умолчанию отдаём первую страницу и говорим, сколько
+    всего.
+    """
+
+    query: str = Field(
+        "", description="Часть домена для поиска, например 'climtec'. "
+                        "Пусто — все сайты.")
+    limit: int = Field(
+        50, ge=1, le=200, description="Сколько сайтов показать за раз")
+    offset: int = Field(
+        0, ge=0, description="Сколько сайтов пропустить — для следующей страницы")
+
+
 class ListFindingsParams(RunScoped):
     site: str = Field(
         "", description="Домен, например 'climtec.md'. Пусто — весь портфель.")
@@ -177,6 +195,24 @@ class RunSummary(sdl.Entity):
     worst_site: str = ""
     worst_score: int = 0
     finished: bool = False
+
+
+class ConnectedSite(sdl.Entity):
+    """Подключённый сайт — строка списка портфеля.
+
+    Отличается от SiteScore намеренно: тот показывает ОЦЕНКУ сайта в конкретном
+    прогоне, а этот отвечает на вопрос «какие сайты у меня вообще подключены» —
+    по всем прогонам, с датой последней проверки.
+    """
+
+    origin: str = ""
+    host: str = ""
+    state: str = ""
+    state_label: str = ""
+    pages: int = 0
+    runs: int = 0
+    last_checked: str = ""
+    failure: str = ""
 
 
 class SiteScore(sdl.Entity):

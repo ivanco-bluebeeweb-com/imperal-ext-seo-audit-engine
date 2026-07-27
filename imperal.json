@@ -531,6 +531,167 @@
       "owner_chat_tool": "seo_audit"
     },
     {
+      "name": "list_connected_sites",
+      "description": "Показать все сайты, подключённые к аудиту — по всем прогонам, с датой последней проверки. Есть поиск по части домена и постраничный вывод: портфель бывает на сотни сайтов.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "description": "Что показать в списке подключённых сайтов.\n\nЕсть `query` и постраничность, потому что портфель бывает на сотни доменов:\nвываливать их в чат одним куском бессмысленно — читать это невозможно, а\nответ раздувается. По умолчанию отдаём первую страницу и говорим, сколько\nвсего.",
+        "properties": {
+          "query": {
+            "default": "",
+            "description": "Часть домена для поиска, например 'climtec'. Пусто — все сайты.",
+            "title": "Query",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "description": "Сколько сайтов показать за раз",
+            "maximum": 200,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Сколько сайтов пропустить — для следующей страницы",
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "title": "ListConnectedParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Подключённый сайт — строка списка портфеля.\n\nОтличается от SiteScore намеренно: тот показывает ОЦЕНКУ сайта в конкретном\nпрогоне, а этот отвечает на вопрос «какие сайты у меня вообще подключены» —\nпо всем прогонам, с датой последней проверки.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "origin": {
+            "default": "",
+            "title": "Origin",
+            "type": "string"
+          },
+          "host": {
+            "default": "",
+            "title": "Host",
+            "type": "string"
+          },
+          "state": {
+            "default": "",
+            "title": "State",
+            "type": "string"
+          },
+          "state_label": {
+            "default": "",
+            "title": "State Label",
+            "type": "string"
+          },
+          "pages": {
+            "default": 0,
+            "title": "Pages",
+            "type": "integer"
+          },
+          "runs": {
+            "default": 0,
+            "title": "Runs",
+            "type": "integer"
+          },
+          "last_checked": {
+            "default": "",
+            "title": "Last Checked",
+            "type": "string"
+          },
+          "failure": {
+            "default": "",
+            "title": "Failure",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "ConnectedSite",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
       "name": "list_sites",
       "description": "Показать сайты последнего аудита с оценкой здоровья и главной проблемой каждого — сводка по портфелю.",
       "action_type": "read",

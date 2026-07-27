@@ -21,10 +21,12 @@ import codes as c
 from app import chat
 from models import (
     AuditTask,
+    ConnectedSite,
     ExportPlan,
     ExportPlanParams,
     Finding,
     GetReportParams,
+    ListConnectedParams,
     ListFindingsParams,
     ListRunsParams,
     ListTasksParams,
@@ -95,6 +97,97 @@ async def list_runs(ctx, params: ListRunsParams) -> ActionResult:
         )
     finally:
         store.close()
+
+
+@chat.function(
+    "list_connected_sites",
+    "Показать все сайты, подключённые к аудиту — по всем прогонам, с датой "
+    "последней проверки. Есть поиск по части домена и постраничный вывод: "
+    "портфель бывает на сотни сайтов.",
+    action_type="read",
+    data_model=ConnectedSite,
+)
+async def list_connected_sites(ctx, params: ListConnectedParams) -> ActionResult:
+    """Список подключённых сайтов — «что у меня вообще есть».
+
+    Отличается от `list_sites` намеренно. Тот показывает сайты ОДНОГО прогона с
+    оценками — это отчёт. Здесь вопрос другой: какие сайты подключены вообще, по
+    всем прогонам. Домен, проверенный трижды, здесь одна строка с датой
+    последней проверки, а не три.
+
+    Постраничность не украшение: на портфеле из 500 доменов полный список
+    невозможно прочитать в чате, а ответ раздувается. Отдаём страницу и всегда
+    говорим, сколько всего и как посмотреть дальше.
+    """
+    store, _run, err = await open_portfolio(ctx)
+    if err:
+        return err
+    try:
+        rows, total = br.connected_sites(
+            store,
+            query=params.query,
+            offset=params.offset,
+            limit=params.limit,
+        )
+    except Exception as exc:
+        await ctx.log(f"list_connected_sites failed: {type(exc).__name__}", "error")
+        return _error(
+            "Не удалось прочитать список сайтов. Попробуйте ещё раз.",
+            c.SEO_DB_UNREADABLE,
+        )
+    finally:
+        store.close()
+
+    if not total:
+        # Пусто — не ошибка, а состояние. Но при поиске и при пустом портфеле
+        # человеку нужен РАЗНЫЙ следующий шаг, поэтому тексты разные.
+        if params.query:
+            return ActionResult.success(
+                sdl.EntityList(items=[]),
+                f"По запросу «{params.query}» подключённых сайтов не нашлось. "
+                f"Попробуйте часть домена покороче.",
+            )
+        return _error(
+            "Подключённых сайтов пока нет. Скажите, например, «проверь "
+            "climtec.md» — и сайт появится в списке.",
+            c.SEO_NO_SITES,
+        )
+
+    items = [
+        ConnectedSite(
+            id=row["host"],
+            title=row["host"],
+            subtitle=br.state_label(row["state"]) + (
+                f" · {row['pages']} стр." if row["pages"] else ""),
+            kind="seo_connected_site",
+            origin=row["origin"],
+            host=row["host"],
+            state=row["state"],
+            state_label=br.state_label(row["state"]),
+            pages=row["pages"],
+            runs=row["runs"],
+            last_checked=br.when_label(row["last_seen"]),
+            failure=row["error"],
+        )
+        for row in rows
+    ]
+
+    shown_to = params.offset + len(items)
+    parts = [f"Подключённых сайтов: {total}"]
+    if total > len(items):
+        parts.append(f"показаны {params.offset + 1}–{shown_to}")
+    if params.query:
+        parts.append(f"поиск: «{params.query}»")
+
+    broken = [r for r in rows if r["state"] == "error"]
+    if broken:
+        parts.append(f"не открылись: {len(broken)}")
+
+    summary = ". ".join(parts) + "."
+    if shown_to < total:
+        summary += f" Дальше — offset={shown_to}."
+
+    return ActionResult.success(sdl.EntityList(items=items), summary)
 
 
 @chat.function(

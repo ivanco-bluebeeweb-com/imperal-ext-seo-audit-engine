@@ -356,3 +356,146 @@ async def to_thread(fn, *args, **kwargs):
 
 def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+# --- подключённые сайты ------------------------------------------------------
+#
+# «Подключённый сайт» — это УНИКАЛЬНЫЙ origin по ВСЕМ прогонам, а не строка
+# таблицы `sites`. В схеме `sites` привязана к run_id (UNIQUE(run_id, origin)),
+# поэтому один и тот же домен, проверенный трижды, лежит тремя записями. Для
+# списка портфеля это один сайт с датой последней проверки.
+#
+# Почему отдельная функция, а не `site_rows`: та готовит ОТЧЁТ и на каждый сайт
+# делает четыре обращения к базе плюс строит задачи и тянет ВСЕ находки. На
+# портфеле из 500 сайтов это ~2000 запросов и ~460 КБ данных ради списка имён.
+# Здесь один агрегирующий запрос, а поиск и постраничность выполняет SQLite:
+# объём ответа зависит от размера СТРАНИЦЫ, а не от размера портфеля.
+
+SITES_PAGE = 50          # сколько сайтов на странице по умолчанию
+SITES_PAGE_MAX = 200     # предохранитель: не отдаём в UI неограниченную выборку
+
+
+def connected_sites(
+    store: Store,
+    *,
+    query: str = "",
+    offset: int = 0,
+    limit: int = SITES_PAGE,
+) -> tuple[list[dict[str, Any]], int]:
+    """Список подключённых сайтов: (страница, всего).
+
+    Сортировка сознательно не по алфавиту: сначала те, что НЕ в порядке
+    (ошибка/не проверялся), затем по свежести проверки. В портфеле из 500
+    доменов алфавит бесполезен — «что сломалось» важнее «что на букву А».
+
+    `query` фильтрует по подстроке домена на стороне SQLite (LIKE), поэтому
+    поиск не требует выгружать портфель в память.
+    """
+    limit = max(1, min(int(limit or SITES_PAGE), SITES_PAGE_MAX))
+    offset = max(0, int(offset or 0))
+
+    where = ""
+    params: list[Any] = []
+    if query:
+        where = "WHERE s.origin LIKE ? ESCAPE '\\'"
+        needle = str(query).strip().lower()
+        for ch in ("\\", "%", "_"):      # экранируем метасимволы LIKE
+            needle = needle.replace(ch, "\\" + ch)
+        params.append(f"%{needle}%")
+
+    db = store.db
+    total = db.execute(
+        f"SELECT COUNT(DISTINCT s.origin) FROM sites s {where}", params
+    ).fetchone()[0]
+
+    # Одна строка на origin: последний прогон, в котором сайт встречался,
+    # его состояние в этом прогоне и суммарное число проверенных страниц.
+    rows = db.execute(
+        f"""
+        SELECT
+            s.origin                                   AS origin,
+            MAX(r.started_at)                          AS last_seen,
+            COUNT(DISTINCT s.run_id)                   AS runs,
+            (SELECT s2.state FROM sites s2
+              JOIN runs r2 ON r2.id = s2.run_id
+             WHERE s2.origin = s.origin
+             ORDER BY r2.started_at DESC LIMIT 1)      AS state,
+            (SELECT s3.error FROM sites s3
+              JOIN runs r3 ON r3.id = s3.run_id
+             WHERE s3.origin = s.origin
+             ORDER BY r3.started_at DESC LIMIT 1)      AS error,
+            (SELECT s4.id FROM sites s4
+              JOIN runs r4 ON r4.id = s4.run_id
+             WHERE s4.origin = s.origin
+             ORDER BY r4.started_at DESC LIMIT 1)      AS last_site_id
+        FROM sites s
+        JOIN runs r ON r.id = s.run_id
+        {where}
+        GROUP BY s.origin
+        ORDER BY
+            CASE WHEN state = 'done' THEN 1 ELSE 0 END,  -- проблемные сверху
+            last_seen DESC,
+            s.origin
+        LIMIT ? OFFSET ?
+        """,
+        [*params, limit, offset],
+    ).fetchall()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        site_id = row["last_site_id"]
+        pages = store.count_pages(site_id) if site_id else 0
+        out.append({
+            "origin": row["origin"],
+            "host": host_label(row["origin"]),
+            "state": row["state"] or "pending",
+            "error": row["error"] or "",
+            "runs": int(row["runs"] or 0),
+            "pages": pages,
+            "last_seen": float(row["last_seen"] or 0.0),
+            "last_site_id": site_id,
+        })
+    return out, int(total)
+
+
+def when_label(ts: float) -> str:
+    """Человеческое «когда»: сегодня / вчера / N дней назад / дата.
+
+    Точное время в списке из 500 строк не читают — важно «свежо или давно».
+    """
+    if not ts:
+        return "не проверялся"
+    import time as _time
+
+    delta = _time.time() - float(ts)
+    if delta < 0:
+        return "только что"
+    days = int(delta // 86400)
+    if days == 0:
+        hours = int(delta // 3600)
+        if hours == 0:
+            return "только что"
+        return f"{hours} ч назад"
+    if days == 1:
+        return "вчера"
+    if days < 30:
+        return f"{days} дн назад"
+    return _time.strftime("%d.%m.%Y", _time.localtime(ts))
+
+
+# Подписи состояний сайта — ОДНО место на всё приложение: и панель, и чат.
+# Дублировать их в двух файлах значит однажды поправить в одном и получить
+# «проверен» в панели и «done» в чате на одном и том же сайте.
+STATE_LABELS = {
+    "done": "проверен",
+    "error": "не открылся",
+    "pending": "в очереди",
+    "discovering": "изучается",
+    "fetching": "проверяется",
+}
+
+
+def state_label(state: str) -> str:
+    """Человеческая подпись состояния. Неизвестное — как есть, без выдумок."""
+    key = (state or "").strip().lower()
+    return STATE_LABELS.get(key, key or "—")

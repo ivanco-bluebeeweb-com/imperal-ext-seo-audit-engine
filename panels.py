@@ -50,6 +50,20 @@ FIRST_RUN = (
 )
 
 
+def _int_param(raw: Any, default: int = 0) -> int:
+    """Целое из параметра панели — молча и безопасно.
+
+    Параметры приходят из UI строками, а иногда мусором: offset="abc" или
+    пустая строка. Панель обязана в этом случае показать первую страницу, а не
+    упасть с ошибкой рендера — пользователь не виноват в чужом клике.
+    """
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
 async def _load(ctx, min_severity: str = "medium") -> dict[str, Any]:
     """Прочитать портфель для панели.
 
@@ -94,6 +108,48 @@ async def _load(ctx, min_severity: str = "medium") -> dict[str, Any]:
             pass
 
 
+async def _load_sites(ctx, *, query: str = "", offset: int = 0,
+                      limit: int = br.SITES_PAGE) -> dict[str, Any]:
+    """Лёгкое чтение ТОЛЬКО списка подключённых сайтов.
+
+    Отдельно от `_load` намеренно. `_load` готовит сводку и поднимает находки
+    по всем сайтам: на портфеле из 500 доменов это ~460 КБ и 500 построенных
+    задач — ради списка имён. Здесь один агрегирующий запрос, а поиск и
+    постраничность делает SQLite, поэтому объём ответа зависит от размера
+    СТРАНИЦЫ, а не портфеля.
+    """
+    try:
+        path = await br.download_db(ctx)
+    except Exception as exc:
+        await ctx.log(f"panel: storage read failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось получить список сайтов. Попробуйте обновить."}
+
+    if not path:
+        return {"first_run": True}
+
+    try:
+        store = br.open_store(path)
+    except Exception as exc:
+        await ctx.log(f"panel: db unreadable: {type(exc).__name__}", "error")
+        return {"problem": "Список сайтов не читается. Запустите аудит заново."}
+
+    try:
+        page, total = br.connected_sites(store, query=query,
+                                         offset=offset, limit=limit)
+        if not total and not query:
+            return {"first_run": True}
+        return {"sites": page, "total": total, "query": query,
+                "offset": offset, "limit": limit}
+    except Exception as exc:
+        await ctx.log(f"panel: sites load failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось собрать список сайтов. Попробуйте обновить."}
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+
+
 def _banner(text: str) -> Any:
     """Баннер вместо пустого экрана — и всегда с выходом к действию.
 
@@ -110,6 +166,125 @@ def _banner(text: str) -> Any:
                       on_click=ui.Call("__panel__seo")),
         ]),
     ])
+
+
+# Подписи состояний сайта. Английские коды движка в UI не место.
+# ТОЛЬКО цвета. Сами подписи живут в bridge.state_label — один источник на
+# панель и чат, иначе однажды поправишь в одном месте и получишь «проверен» в
+# панели и «done» в чате про один и тот же сайт.
+STATE_COLOUR = {
+    "done": "green",
+    "error": "red",
+    "pending": "gray",
+    "discovering": "blue",
+    "fetching": "blue",
+}
+
+
+def _sites_view(data: dict[str, Any]) -> Any:
+    """Список подключённых сайтов — рассчитан на портфель из сотен доменов.
+
+    ПОЧЕМУ ПОИСК СВОЙ, А НЕ `searchable=True`.
+    `ui.List(searchable=True)` фильтрует те элементы, которые ЕМУ ПЕРЕДАЛИ. При
+    постраничной выдаче это означает поиск по текущей странице — на портфеле из
+    500 сайтов пользователь набрал бы «climtec», не увидел его на странице 1 из
+    10 и решил, что сайт не подключён. Тихая ложь хуже отсутствия поиска.
+    Поэтому поиск уходит параметром в панель и выполняется в SQLite по ВСЕМУ
+    портфелю, а `searchable` выключен намеренно.
+
+    ПОЧЕМУ СТРАНИЦАМИ. Панель обязана оставаться предсказуемой при 500 сайтах:
+    отдаём страницу (50 по умолчанию) и общее число, чтобы человек видел
+    «50 из 500», а не бесконечную простыню. Объём ответа зависит от размера
+    страницы, а не портфеля.
+
+    SKETCH -- view="sites"
+      ui.Stack (v, gap=3)
+        ui.Header("Подключённые сайты", subtitle="всего N")
+        ui.Form(action="__panel__seo") -> ui.Input(param_name="q")   # поиск по всем
+        ui.List(items=[ui.ListItem * page], total_items=N, extra_info="50 из 500")
+        ui.Row -> ui.Button("Назад") / ui.Button("Дальше")           # если страниц > 1
+    """
+    sites = data.get("sites") or []
+    total = int(data.get("total") or 0)
+    query = str(data.get("query") or "")
+    offset = int(data.get("offset") or 0)
+    limit = int(data.get("limit") or br.SITES_PAGE)
+
+    items: list[Any] = []
+    for row in sites:
+        host = row["host"]
+        label = br.state_label(row["state"])
+        colour = STATE_COLOUR.get(row["state"], "gray")
+        bits = [label]
+        if row["pages"]:
+            bits.append(f"{row['pages']} стр.")
+        if row["runs"] > 1:
+            bits.append(f"проверок: {row['runs']}")
+        items.append(ui.ListItem(
+            id=host,
+            title=host,
+            subtitle=" · ".join(bits),
+            meta=br.when_label(row["last_seen"]),
+            badge=ui.Badge(label=label, color=colour),
+            # Повторная проверка одного сайта — самое частое действие в списке.
+            actions=[{"icon": "RefreshCw",
+                      "on_click": ui.Call("audit_sites", sites=host)}],
+        ))
+
+    shown_from = offset + 1 if items else 0
+    shown_to = offset + len(items)
+    footer = (f"{shown_from}\u2013{shown_to} из {total}"
+              if total > len(items) else f"всего {total}")
+
+    children: list[Any] = [
+        ui.Header("Подключённые сайты",
+                  subtitle=(f"найдено {total} по запросу «{query}»" if query
+                            else f"всего {total}")),
+        # Поиск по ВСЕМУ портфелю: значение уходит в панель как параметр q.
+        ui.Form(action="__panel__seo", submit_label="Найти",
+                defaults={"view": "sites"},
+                children=[
+                    ui.Input(placeholder="часть домена, например climtec",
+                             param_name="q", value=query),
+                ]),
+    ]
+
+    if items:
+        children.append(ui.List(items=items, searchable=False,
+                                total_items=total, extra_info=footer))
+    elif query:
+        children.append(ui.Empty(
+            message=f"По запросу «{query}» ничего не нашлось. "
+                    f"Всего подключено сайтов: {total}."))
+    else:
+        children.append(ui.Empty(message="Пока ни одного сайта."))
+
+    # Постраничная навигация — только если страниц действительно больше одной.
+    nav: list[Any] = []
+    if offset > 0:
+        nav.append(ui.Button(label="\u2190 Назад", variant="secondary",
+                             on_click=ui.Call("__panel__seo", view="sites",
+                                              q=query,
+                                              offset=max(0, offset - limit),
+                                              limit=limit)))
+    if shown_to < total:
+        nav.append(ui.Button(label="Дальше \u2192", variant="secondary",
+                             on_click=ui.Call("__panel__seo", view="sites",
+                                              q=query, offset=offset + limit,
+                                              limit=limit)))
+    if query:
+        nav.append(ui.Button(label="Сбросить поиск", variant="ghost",
+                             on_click=ui.Call("__panel__seo", view="sites")))
+    if nav:
+        children.append(ui.Row(gap=2, children=nav))
+
+    children.append(ui.Row(gap=2, children=[
+        ui.Button(label="+ Добавить сайт",
+                  on_click=ui.Call("__panel__seo", view="add")),
+        ui.Button(label="Сводка по портфелю", variant="secondary",
+                  on_click=ui.Call("__panel__seo")),
+    ]))
+    return ui.Stack(direction="v", gap=3, children=children)
 
 
 def _first_run() -> Any:
@@ -280,7 +455,7 @@ def _add_view(data: dict[str, Any]) -> Any:
     него не дойдёт. Домены разбирает `parse_sites`, поэтому здесь можно вводить
     и один сайт, и список через запятую, со схемой или без.
     """
-    known = [br.host_label(r["origin"]) for r in data.get("rows", [])]
+    known = [str(h) for h in (data.get("known") or [])]
 
     children: list[Any] = [
         ui.Header("Добавить сайт в аудит",
@@ -326,15 +501,42 @@ async def seo_center(ctx, **kwargs):
         ui.Row -> ui.Button * 3    # переключение экранов
     """
     view = str(kwargs.get("view") or "").strip().lower()
-    data = await _load(ctx)
 
-    # «Добавить сайт» обрабатывается ПЕРВЫМ — до проверок на пустоту и до
-    # баннера об ошибке. Иначе главное действие приложения было бы недоступно
-    # ровно в двух состояниях, где оно нужнее всего: на первом запуске (когда
-    # добавлять сайты и надо) и при сбое чтения базы (когда пользователю нечем
-    # себе помочь). Форма ввода не зависит от прошлых результатов.
+    # ЛЁГКИЕ ЭКРАНЫ ИДУТ ДО ТЯЖЁЛОГО ЧТЕНИЯ.
+    #
+    # `_load` готовит сводку и поднимает находки по всем сайтам: на портфеле из
+    # 500 доменов это ~460 КБ и 500 построенных задач. Экрану «добавить сайт»
+    # эти данные не нужны вовсе, а списку сайтов нужен свой лёгкий запрос с
+    # постраничностью. Если вызвать `_load` раньше ветвления, оба экрана платят
+    # за чужую работу — и тем сильнее, чем больше портфель.
+    #
+    # «Добавить сайт» стоит первым ещё и по второй причине: главное действие
+    # обязано работать в состояниях «ничего ещё нет» и «база не читается», то
+    # есть до любых проверок на пустоту и до баннера об ошибке.
     if view == "add":
-        return _add_view(data if not data.get("problem") else {})
+        # Лёгкая справка «что уже в портфеле»: одна страница имён, без находок.
+        # Нужна, чтобы человек не запускал повторно то, что уже проверяется —
+        # это лишняя нагрузка на чужой сервер.
+        known = await _load_sites(ctx, limit=12)
+        return _add_view({
+            "known": [r["host"] for r in (known.get("sites") or [])],
+            "total": known.get("total") or 0,
+        })
+
+    if view == "sites":
+        sites_data = await _load_sites(
+            ctx,
+            query=str(kwargs.get("q") or "").strip(),
+            offset=_int_param(kwargs.get("offset")),
+            limit=_int_param(kwargs.get("limit")) or br.SITES_PAGE,
+        )
+        if sites_data.get("problem"):
+            return _banner(sites_data["problem"])
+        if sites_data.get("first_run"):
+            return _first_run()
+        return _sites_view(sites_data)
+
+    data = await _load(ctx)
 
     if data.get("problem"):
         return _banner(data["problem"])
@@ -379,21 +581,28 @@ async def seo_nav(ctx, **kwargs):
                   on_click=ui.Call("__panel__seo", view="add")),
     ]
 
-    data = await _load(ctx)
+    # Сайдбар читает ЛЁГКО. Раньше здесь вызывался `_load`, который поднимает
+    # находки по всем сайтам и строит задачи — 460 КБ на портфеле из 500
+    # доменов ради двух чисел в подписи, и так при каждом обновлении панели.
+    # Теперь берём только счётчик и одну страницу для сводки.
+    data = await _load_sites(ctx, limit=1)
 
     if data.get("problem"):
         state = "Результаты недоступны"
         extra: list[Any] = []
     elif data.get("first_run"):
-        state = "Аудитов ещё не было"
+        state = "Сайтов пока нет"
         extra = []
     else:
-        rows = data["rows"]
-        done = [r for r in rows if r["state"] == "done"]
-        tasks = sum(r["tasks"] for r in done)
-        state = f"Сайтов: {len(done)} · задач: {tasks}"
+        total = int(data.get("total") or 0)
+        state = f"Подключено сайтов: {total}"
         extra = [
-            ui.Button(label="Открыть портфель", variant="secondary",
+            # Список сайтов — второе по важности действие после «добавить»:
+            # именно его спрашивают первым, когда портфель большой.
+            ui.Button(label=f"Все сайты ({total})", variant="secondary",
+                      full_width=True,
+                      on_click=ui.Call("__panel__seo", view="sites")),
+            ui.Button(label="Сводка по портфелю", variant="secondary",
                       full_width=True, on_click=ui.Call("__panel__seo")),
             ui.Button(label="Задачи", variant="ghost", full_width=True,
                       on_click=ui.Call("__panel__seo", view="tasks")),
