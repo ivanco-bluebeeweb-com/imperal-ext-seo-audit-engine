@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .discover import with_scheme
 from .engine import AuditConfig, Engine
 from .export_tracker import (
     DEFAULT_PROJECT,
@@ -42,7 +43,7 @@ def _read_sites(path: str) -> list[str]:
     for raw in Path(path).read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
         if line:
-            out.append(line)
+            out.append(with_scheme(line))
     return out
 
 
@@ -103,9 +104,12 @@ def _site_rows(store: Store, run_id: int,
 # ── команды ───────────────────────────────────────────────────────────────
 
 def cmd_audit(args: argparse.Namespace) -> int:
-    origins = list(args.site or [])
+    # Схема дописывается на границе ВВОДА: без неё голый домен превращается в
+    # адрес без хоста, и прогон возвращает «сайт недоступен» вместо аудита.
+    origins = [with_scheme(s) for s in (args.site or [])]
     if args.sites:
         origins.extend(_read_sites(args.sites))
+    origins = [o for o in origins if o]
     if not origins:
         print("Нечего проверять: укажите --site или --sites файл", file=sys.stderr)
         return 2

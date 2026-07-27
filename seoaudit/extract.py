@@ -46,6 +46,8 @@ class HeadData:
     og_title: str = ""
     og_description: str = ""
     og_locale: str = ""
+    og_image: str = ""
+    og_type: str = ""
     viewport: str = ""
     charset: str = ""
     text_sample: str = ""       # начало видимого текста — для проверки языка
@@ -53,6 +55,8 @@ class HeadData:
     word_count: int = 0
     links_internal: list[str] = field(default_factory=list)
     links_external: int = 0
+    links_internal_total: int = 0
+    heading_levels: list[int] = field(default_factory=list)
     images_total: int = 0
     images_no_alt: int = 0
     json_ld_types: list[str] = field(default_factory=list)
@@ -130,6 +134,12 @@ class _HeadParser(HTMLParser):
         elif tag == "h1":
             self._h1_depth += 1
             self._h1_parts = []
+            self.d.heading_levels.append(1)
+        elif tag in ("h2", "h3", "h4", "h5", "h6"):
+            # Только УРОВНИ, без текста: для проверки иерархии большего не нужно,
+            # а хранить все заголовки страницы в БД — лишний вес на 200 сайтах.
+            if len(self.d.heading_levels) < 200:
+                self.d.heading_levels.append(int(tag[1]))
         elif tag == "img":
             self.d.images_total += 1
             if not collapse(attrs.get("alt", "")):
@@ -139,6 +149,7 @@ class _HeadParser(HTMLParser):
             if href and not href.startswith(("#", "javascript:", "mailto:", "tel:")):
                 absolute = urljoin(self.base, href)
                 if self._origin and absolute.startswith(self._origin):
+                    self.d.links_internal_total += 1
                     if len(self.d.links_internal) < 3000:
                         self.d.links_internal.append(absolute)
                 elif absolute.startswith(("http://", "https://")):
@@ -221,6 +232,26 @@ class _HeadParser(HTMLParser):
             self.d.og_description = collapse(content)
         elif prop == "og:locale" and not self.d.og_locale:
             self.d.og_locale = collapse(content)
+        elif prop == "og:image" and not self.d.og_image:
+            self.d.og_image = collapse(content)
+        elif prop == "og:type" and not self.d.og_type:
+            self.d.og_type = collapse(content)
+        # Часть тем выводит Open Graph через name=, а не property= — по букве
+        # спецификации это неверно, но Facebook и поисковики такое читают,
+        # поэтому объявить «нет og:image» из-за атрибута было бы ложной находкой.
+        if name.startswith("og:"):
+            if name == "og:title" and not self.d.og_title:
+                self.d.og_title = collapse(content)
+            elif name == "og:description" and not self.d.og_description:
+                self.d.og_description = collapse(content)
+            elif name == "og:image" and not self.d.og_image:
+                self.d.og_image = collapse(content)
+            elif name == "og:url" and not self.d.og_url:
+                self.d.og_url = collapse(content)
+            elif name == "og:locale" and not self.d.og_locale:
+                self.d.og_locale = collapse(content)
+            elif name == "og:type" and not self.d.og_type:
+                self.d.og_type = collapse(content)
         # http-equiv="content-language"
         if (attrs.get("http-equiv") or "").lower() == "content-language" and not self.d.html_lang:
             self.d.html_lang = collapse(content)

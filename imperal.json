@@ -1500,10 +1500,707 @@
       "long_running": false,
       "scopes": [],
       "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "fix_plan",
+      "description": "Показать готовые правки по итогам аудита: для каждой страницы — какое поле и на какое значение поменять. Сам план ничего не меняет: правки применяет коннектор сайта по подтверждению.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "description": "Какие правки показать и насколько готовые.",
+        "properties": {
+          "run_id": {
+            "default": 0,
+            "description": "Номер прогона. 0 или пусто — последний прогон.",
+            "minimum": 0,
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "site": {
+            "default": "",
+            "description": "Домен, например 'climtec.md'. Пусто — весь портфель.",
+            "title": "Site",
+            "type": "string"
+          },
+          "only_ready": {
+            "default": false,
+            "description": "Только те правки, где значение выведено однозначно и человеку нечего решать.",
+            "title": "Only Ready",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 100,
+            "description": "Сколько правок вернуть",
+            "maximum": 500,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "FixPlanParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "План правок: конкретные значения полей, а не описание беды.\n\nПочему план, а не применение: аудит ничего не меняет на чужих сайтах —\nточно так же, как не создаёт задач в чужом трекере. Правки применяет\nконнектор сайта по подтверждению.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "ready": {
+            "default": 0,
+            "title": "Ready",
+            "type": "integer"
+          },
+          "needs_review": {
+            "default": 0,
+            "title": "Needs Review",
+            "type": "integer"
+          },
+          "pages": {
+            "default": 0,
+            "title": "Pages",
+            "type": "integer"
+          },
+          "by_field": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "By Field",
+            "type": "object"
+          },
+          "fixes": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Fixes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "FixPlan",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "compare_audits",
+      "description": "Сравнить два аудита одного сайта: что починилось, что осталось и что ПОЯВИЛОСЬ нового. Появившееся — регрессия: в общем списке её не видно.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "description": "Что с чем сравнивать.",
+        "properties": {
+          "site": {
+            "description": "Домен, например 'climtec.md'. Сравнение всегда по одному сайту.",
+            "title": "Site",
+            "type": "string"
+          },
+          "after_run": {
+            "default": 0,
+            "description": "Свежий прогон. 0 или пусто — последний прогон этого сайта.",
+            "minimum": 0,
+            "title": "After Run",
+            "type": "integer"
+          },
+          "before_run": {
+            "default": 0,
+            "description": "С чем сравнивать. 0 или пусто — предыдущий прогон этого сайта.",
+            "minimum": 0,
+            "title": "Before Run",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "site"
+        ],
+        "title": "CompareParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Что изменилось между двумя прогонами одного сайта.\n\nОтдельная сущность, а не поле в отчёте: главный её смысл — ПОЯВИВШИЕСЯ\nнаходки. В общем списке регрессия неотличима от старой беды, и заметить\nеё можно только сравнением.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "site": {
+            "default": "",
+            "title": "Site",
+            "type": "string"
+          },
+          "before_run": {
+            "default": 0,
+            "title": "Before Run",
+            "type": "integer"
+          },
+          "after_run": {
+            "default": 0,
+            "title": "After Run",
+            "type": "integer"
+          },
+          "before_score": {
+            "default": 0,
+            "title": "Before Score",
+            "type": "integer"
+          },
+          "after_score": {
+            "default": 0,
+            "title": "After Score",
+            "type": "integer"
+          },
+          "score_delta": {
+            "default": 0,
+            "title": "Score Delta",
+            "type": "integer"
+          },
+          "fixed_count": {
+            "default": 0,
+            "title": "Fixed Count",
+            "type": "integer"
+          },
+          "remains_count": {
+            "default": 0,
+            "title": "Remains Count",
+            "type": "integer"
+          },
+          "appeared_count": {
+            "default": 0,
+            "title": "Appeared Count",
+            "type": "integer"
+          },
+          "reliable": {
+            "default": true,
+            "title": "Reliable",
+            "type": "boolean"
+          },
+          "caveat": {
+            "default": "",
+            "title": "Caveat",
+            "type": "string"
+          },
+          "fixed": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Fixed",
+            "type": "array"
+          },
+          "appeared": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Appeared",
+            "type": "array"
+          },
+          "remains": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Remains",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "AuditComparison",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "set_schedule",
+      "description": "Настроить автоматический аудит: включить или выключить, в какой час, по каким дням недели и какие сайты проверять.",
+      "action_type": "write",
+      "chain_callable": true,
+      "effects": [
+        "update:audit_schedule"
+      ],
+      "id_projection": "",
+      "params_schema": {
+        "description": "Что поменять в расписании. Не переданное — не трогаем.\n\n`enabled` именно Optional[bool], а не bool: у булева поля со значением по\nумолчанию нельзя отличить «выключи» от «не трогай». С обычным bool просьба\n«перенеси на 4 утра» тихо выключила бы расписание — правка одного поля\nсломала бы другое.",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Включить (true) или выключить (false) автоаудит.",
+            "title": "Enabled"
+          },
+          "hour": {
+            "anyOf": [
+              {
+                "maximum": 23,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Час запуска по UTC, 0-23. Ночь спокойнее для чужих сайтов.",
+            "title": "Hour"
+          },
+          "days": {
+            "default": "",
+            "description": "Дни недели через запятую: 1=понедельник … 7=воскресенье. Например '1' или '1,4'. Пусто — не менять.",
+            "title": "Days",
+            "type": "string"
+          },
+          "sites": {
+            "default": "",
+            "description": "Домены через запятую. Пусто — проверять те же сайты, что и в прошлый раз.",
+            "title": "Sites",
+            "type": "string"
+          },
+          "max_pages": {
+            "anyOf": [
+              {
+                "maximum": 500,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Сколько страниц смотреть на каждом сайте.",
+            "title": "Max Pages"
+          }
+        },
+        "title": "ScheduleParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Как настроен автоматический аудит.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hour": {
+            "default": 3,
+            "title": "Hour",
+            "type": "integer"
+          },
+          "days": {
+            "default": "",
+            "title": "Days",
+            "type": "string"
+          },
+          "days_label": {
+            "default": "",
+            "title": "Days Label",
+            "type": "string"
+          },
+          "sites": {
+            "default": "",
+            "title": "Sites",
+            "type": "string"
+          },
+          "max_pages": {
+            "default": 50,
+            "title": "Max Pages",
+            "type": "integer"
+          },
+          "last_run_id": {
+            "default": 0,
+            "title": "Last Run Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "ScheduleState",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "seo-audit-engine.set_schedule",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
+    },
+    {
+      "name": "get_schedule",
+      "description": "Показать, как настроен автоматический аудит: включён ли, когда запускается и какие сайты проверяет.",
+      "action_type": "read",
+      "chain_callable": true,
+      "effects": [],
+      "id_projection": "",
+      "params_schema": {
+        "description": "Ничего не принимает — модель есть, потому что её требует контракт.\n\nИнструмент без параметров всё равно обязан объявить схему: платформа\nвыводит форму вызова из модели, и `params: None` оставил бы её пустой не\n«намеренно», а «неизвестно».",
+        "properties": {},
+        "title": "GetScheduleParams",
+        "type": "object"
+      },
+      "return_schema": {
+        "description": "Как настроен автоматический аудит.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subtitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subtitle"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hour": {
+            "default": 3,
+            "title": "Hour",
+            "type": "integer"
+          },
+          "days": {
+            "default": "",
+            "title": "Days",
+            "type": "string"
+          },
+          "days_label": {
+            "default": "",
+            "title": "Days Label",
+            "type": "string"
+          },
+          "sites": {
+            "default": "",
+            "title": "Sites",
+            "type": "string"
+          },
+          "max_pages": {
+            "default": 50,
+            "title": "Max Pages",
+            "type": "integer"
+          },
+          "last_run_id": {
+            "default": 0,
+            "title": "Last Run Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "ScheduleState",
+        "type": "object",
+        "x-sdl": "entity"
+      },
+      "event": "",
+      "background": false,
+      "long_running": false,
+      "scopes": [],
+      "owner_chat_tool": "seo_audit"
     }
   ],
   "signals": [],
-  "schedules": [],
+  "schedules": [
+    {
+      "name": "seo_auto_audit",
+      "cron": "5 * * * *"
+    }
+  ],
   "required_scopes": [],
   "icon_size_bytes": 448,
   "lifecycle": {

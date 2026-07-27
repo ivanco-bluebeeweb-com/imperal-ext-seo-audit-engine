@@ -162,6 +162,65 @@ class ExportPlanParams(RunScoped):
         return _check_severity(v)
 
 
+class GetScheduleParams(BaseModel):
+    """Ничего не принимает — модель есть, потому что её требует контракт.
+
+    Инструмент без параметров всё равно обязан объявить схему: платформа
+    выводит форму вызова из модели, и `params: None` оставил бы её пустой не
+    «намеренно», а «неизвестно».
+    """
+
+
+class ScheduleParams(BaseModel):
+    """Что поменять в расписании. Не переданное — не трогаем.
+
+    `enabled` именно Optional[bool], а не bool: у булева поля со значением по
+    умолчанию нельзя отличить «выключи» от «не трогай». С обычным bool просьба
+    «перенеси на 4 утра» тихо выключила бы расписание — правка одного поля
+    сломала бы другое.
+    """
+
+    enabled: bool | None = Field(
+        None, description="Включить (true) или выключить (false) автоаудит.")
+    hour: int | None = Field(
+        None, ge=0, le=23,
+        description="Час запуска по UTC, 0-23. Ночь спокойнее для чужих сайтов.")
+    days: str = Field(
+        "", description=("Дни недели через запятую: 1=понедельник … 7=воскресенье. "
+                         "Например '1' или '1,4'. Пусто — не менять."))
+    sites: str = Field(
+        "", description=("Домены через запятую. Пусто — проверять те же сайты, "
+                         "что и в прошлый раз."))
+    max_pages: int | None = Field(
+        None, ge=1, le=500, description="Сколько страниц смотреть на каждом сайте.")
+
+
+class CompareParams(BaseModel):
+    """Что с чем сравнивать."""
+
+    site: str = Field(
+        ..., description="Домен, например 'climtec.md'. Сравнение всегда по одному сайту.")
+    after_run: int = Field(
+        0, ge=0,
+        description="Свежий прогон. 0 или пусто — последний прогон этого сайта.")
+    before_run: int = Field(
+        0, ge=0,
+        description="С чем сравнивать. 0 или пусто — предыдущий прогон этого сайта.")
+
+
+class FixPlanParams(RunScoped):
+    """Какие правки показать и насколько готовые."""
+
+    site: str = Field(
+        "", description="Домен, например 'climtec.md'. Пусто — весь портфель.")
+    only_ready: bool = Field(
+        False,
+        description=("Только те правки, где значение выведено однозначно и "
+                     "человеку нечего решать."))
+    limit: int = Field(
+        100, ge=1, le=500, description="Сколько правок вернуть")
+
+
 # --------------------------- сущности результата ---------------------------
 
 class RunStarted(sdl.Entity):
@@ -264,6 +323,58 @@ class Report(sdl.Entity):
     markdown: str = ""
     sites_count: int = 0
     tasks_total: int = 0
+
+
+class ScheduleState(sdl.Entity):
+    """Как настроен автоматический аудит."""
+
+    enabled: bool = False
+    hour: int = 3
+    days: str = ""
+    days_label: str = ""
+    sites: str = ""
+    max_pages: int = 50
+    last_run_id: int = 0
+
+
+class AuditComparison(sdl.Entity):
+    """Что изменилось между двумя прогонами одного сайта.
+
+    Отдельная сущность, а не поле в отчёте: главный её смысл — ПОЯВИВШИЕСЯ
+    находки. В общем списке регрессия неотличима от старой беды, и заметить
+    её можно только сравнением.
+    """
+
+    site: str = ""
+    before_run: int = 0
+    after_run: int = 0
+    before_score: int = 0
+    after_score: int = 0
+    score_delta: int = 0
+    fixed_count: int = 0
+    remains_count: int = 0
+    appeared_count: int = 0
+    reliable: bool = True
+    caveat: str = ""
+    fixed: list[dict] = []
+    appeared: list[dict] = []
+    remains: list[dict] = []
+
+
+class FixPlan(sdl.Entity):
+    """План правок: конкретные значения полей, а не описание беды.
+
+    Почему план, а не применение: аудит ничего не меняет на чужих сайтах —
+    точно так же, как не создаёт задач в чужом трекере. Правки применяет
+    коннектор сайта по подтверждению.
+    """
+
+    total: int = 0
+    ready: int = 0
+    needs_review: int = 0
+    pages: int = 0
+    by_field: dict = {}
+    fixes: list[dict] = []
 
 
 class ExportPlan(sdl.Entity):

@@ -85,7 +85,10 @@ def test_refresh_panels_name_real_panels():
     from app import ext
 
     named: set[str] = set()
-    for name in ("handlers_audit.py", "handlers_read.py"):
+    # Список файлов ЯВНЫЙ и должен включать каждый слой обработчиков: тест,
+    # который смотрит только в часть из них, доказывает меньше, чем кажется —
+    # опечатка в неучтённом файле проходит мимо и обнаруживается кликом.
+    for name in ("handlers_audit.py", "handlers_read.py", "handlers_schedule.py"):
         src = open(name, encoding="utf-8").read()
         for block in re.findall(r"refresh_panels=\[([^\]]*)\]", src):
             named |= set(re.findall(r'"(\w+)"', block))
@@ -368,3 +371,115 @@ def test_every_ui_call_matches_the_sdk_signature():
                     f"— такого аргумента нет")
 
     assert not problems, "вызовы ui.* расходятся с SDK:\n  " + "\n  ".join(problems)
+
+
+# --- новые экраны: правки, сравнение, расписание -----------------------------
+
+@pytest.fixture
+def ctx_with_audit(ctx):
+    """Контекст с базой ДВУХ прогонов одного сайта.
+
+    Экраны правок и сравнения на пустой базе показывают «аудита ещё не было»,
+    и тест, видящий только это, доказывает лишь что пустой экран не падает.
+    Проверять надо наполненный.
+
+    База собирается ПУБЛИЧНЫМ API `Store`, а не сырым INSERT: схема живёт в
+    движке (страницы и находки привязаны к `site_id`, а не к прогону), и
+    фикстура, дублирующая её руками, разъезжается при первой же миграции —
+    молча, потому что тест продолжает проходить на устаревшей форме данных.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import bridge as br
+    from seoaudit.store import Store
+
+    path = Path(tempfile.mkdtemp()) / "seed.db"
+    store = Store(str(path))
+
+    head = {
+        "h1": ["Монтаж систем вентиляции в Кишинёве"],
+        "title": "", "description": "", "canonical": "",
+        "links_internal": [], "links_internal_total": 0,
+    }
+
+    for run_no in (1, 2):
+        run_id = store.create_run(label=f"прогон {run_no}")
+        site_id = store.add_site(run_id, "https://s.md/")
+        store.set_site_state(site_id, "done", "", "User-agent: *")
+        store.queue_urls(site_id, ["https://s.md/a"], "seed")
+        page_id = int(store.pending_pages(site_id)[0]["id"])
+        store.save_page_result(page_id, {
+            "state": "done", "status": 200, "final_url": "https://s.md/a",
+            "redirects": 0, "elapsed_ms": 120, "content_type": "text/html",
+            "bytes": 2048, "error": "", "head": head,
+        })
+        findings = [{
+            "key": "title.missing", "layer": 4, "severity": "medium",
+            "url": "https://s.md/a", "message": "Заголовок не задан",
+        }]
+        if run_no == 1:
+            # Дефект, которого во втором прогоне уже не будет — «починено».
+            findings.append({
+                "key": "performance.slow", "layer": 2, "severity": "medium",
+                "url": "https://s.md/a", "message": "Медленный ответ",
+            })
+        store.add_findings(site_id, findings)
+        store.finish_run(run_id)
+
+    store.close()
+
+    import asyncio
+
+    async def _seed():
+        await ctx.storage.upload(br.storage_key(ctx), path.read_bytes(),
+                                 content_type="application/x-sqlite3")
+
+    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_seed())
+    return ctx
+
+
+async def test_fixes_screen_shows_real_values_not_just_complaints(ctx_with_audit):
+    """Экран правок обязан показать НОВОЕ значение, а не диагноз.
+
+    Смысл экрана в том, что «заголовок не задан» превращается в конкретную
+    строку, которую можно применить. Если бы он показывал только формулировку
+    дефекта, он дублировал бы список находок и не стоил бы отдельного клика.
+    """
+    tree = await panels.seo_center(ctx_with_audit, view="fixes")
+    body = _dump(tree)
+    assert "Монтаж систем вентиляции" in body, (
+        "заголовок, собранный из H1, не доехал до таблицы")
+
+
+async def test_comparison_screen_separates_fixed_from_remaining(ctx_with_audit):
+    """Сравнение обязано различать «починено» и «осталось».
+
+    Экран, где всё свалено в один список, не отвечает на единственный вопрос,
+    ради которого его открывают: подействовали правки или нет.
+    """
+    tree = await panels.seo_center(ctx_with_audit, view="compare", site="s.md")
+    body = _dump(tree)
+    assert "починено" in body.lower()
+    assert "осталось" in body.lower()
+
+
+async def test_schedule_screen_form_fields_match_the_tool_parameters(ctx):
+    """Имена полей формы обязаны совпадать с параметрами `set_schedule`.
+
+    Расхождение здесь не падает и не логируется: форма нажимается, значение
+    до инструмента не доходит, настройка молча остаётся прежней. Поэтому
+    проверяем по фактической модели параметров, а не по памяти.
+    """
+    from models import ScheduleParams
+
+    tree = await panels.seo_center(ctx, view="schedule")
+    names = {
+        (getattr(n, "props", {}) or {}).get("param_name")
+        for n in _flatten(tree)
+        if (getattr(n, "props", {}) or {}).get("param_name")
+    }
+    allowed = set(ScheduleParams.model_fields)
+    unknown = names - allowed
+    assert not unknown, f"поля формы, которых нет у set_schedule: {unknown}"
+    assert "enabled" in names, "без переключателя расписание не включить"

@@ -92,6 +92,11 @@ class Finding:
         }
 
 
+def _url_of(page: dict[str, Any]) -> str:
+    """Адрес страницы для находки: после переадресаций, если он известен."""
+    return (page.get("final_url") or page.get("url") or "").strip()
+
+
 def _lang_base(code: str) -> str:
     """'ru-RU' -> 'ru'; 'x-default' -> ''."""
     c = (code or "").strip().lower().replace("_", "-")
@@ -747,6 +752,260 @@ def rule_hreflang(page: dict[str, Any], head: HeadData, ctx: dict[str, Any]) -> 
     return out
 
 
+def rule_structured_data(page: dict[str, Any], head: HeadData,
+                         ctx: dict[str, Any]) -> list[Finding]:
+    """Разметка Schema.org: есть ли она вообще и описан ли сам бизнес.
+
+    Без разметки страница попадает в выдачу «голой»: без звёзд, цены,
+    хлебных крошек, часов работы. Это не влияет на позиции напрямую, но
+    заметно влияет на то, кликнут по вам или по соседу.
+    """
+    if not page_was_fetched(page):
+        return []
+    if head.is_noindex:
+        return []
+
+    types = {t.lower() for t in (head.json_ld_types or [])}
+    url = _url_of(page)
+
+    if not types:
+        return [Finding(
+            key="schema.missing",
+            layer=LAYER_ENHANCEMENT,
+            severity=LOW,
+            effort=EFFORT_MEDIUM,
+            title="Нет структурированной разметки",
+            detail=(
+                "На странице нет разметки Schema.org. Поисковик понимает "
+                "текст, но не понимает, что это: товар, услуга, статья или "
+                "организация. Расширенные сниппеты без неё не показываются."
+            ),
+            url=url,
+        )]
+
+    # Организация/бизнес — то, что связывает сайт с карточкой компании.
+    # Проверяем только на главной: на каждой странице этого и не ждут.
+    path = urlsplit(url).path.rstrip("/")
+    if path in ("", "/"):
+        org_like = {"organization", "localbusiness", "corporation", "store",
+                    "website", "professionalservice", "homeandconstruction"}
+        if not any(any(o in t for o in org_like) for t in types):
+            return [Finding(
+                key="schema.no_organization",
+                layer=LAYER_ENHANCEMENT,
+                severity=LOW,
+                effort=EFFORT_SMALL,
+                title="На главной нет разметки организации",
+                detail=(
+                    "Разметка Organization или LocalBusiness сообщает "
+                    "название, логотип, адрес и контакты — это то, из чего "
+                    "собирается карточка компании в поиске."
+                ),
+                url=url,
+                evidence={"types": sorted(types)},
+            )]
+    return []
+
+
+def rule_open_graph(page: dict[str, Any], head: HeadData,
+                    ctx: dict[str, Any]) -> list[Finding]:
+    """Разметка для ссылок в мессенджерах и соцсетях.
+
+    Когда ссылку кидают в WhatsApp, Telegram или Facebook, превью собирается
+    из og:*. Без картинки ссылка выглядит как голый текст, и по ней кликают
+    заметно реже — это прямая потеря переходов, которую легко не заметить.
+    """
+    if not page_was_fetched(page):
+        return []
+    if head.is_noindex:
+        return []
+
+    url = _url_of(page)
+    missing: list[str] = []
+    if not head.og_title:
+        missing.append("og:title")
+    if not head.og_description:
+        missing.append("og:description")
+    if not head.og_image:
+        missing.append("og:image")
+
+    if len(missing) == 3:
+        return [Finding(
+            key="social.og_missing",
+            layer=LAYER_ENHANCEMENT,
+            severity=LOW,
+            effort=EFFORT_SMALL,
+            title="Нет разметки для превью ссылки",
+            detail=(
+                "При отправке ссылки в мессенджер или соцсеть превью "
+                "собрать не из чего: нет ни заголовка, ни описания, ни "
+                "картинки. Ссылка выглядит голой строкой."
+            ),
+            url=url,
+        )]
+    if "og:image" in missing:
+        return [Finding(
+            key="social.og_image_missing",
+            layer=LAYER_ENHANCEMENT,
+            severity=LOW,
+            effort=EFFORT_SMALL,
+            title="Нет картинки для превью ссылки",
+            detail=(
+                "og:image не задан — превью ссылки будет без изображения. "
+                "Именно картинка даёт основную часть кликов по ссылке в "
+                "мессенджере или ленте."
+            ),
+            url=url,
+        )]
+    return []
+
+
+def rule_mobile_viewport(page: dict[str, Any], head: HeadData,
+                         ctx: dict[str, Any]) -> list[Finding]:
+    """Мета viewport — условие адаптивности.
+
+    Google индексирует мобильную версию первой. Без viewport телефон
+    показывает страницу как уменьшенный десктоп, и это ощутимая потеря —
+    не косметика.
+    """
+    if not page_was_fetched(page):
+        return []
+    if not head.viewport:
+        return [Finding(
+            key="mobile.viewport_missing",
+            layer=LAYER_TECHNICAL,
+            severity=HIGH,
+            effort=EFFORT_SMALL,
+            title="Нет мета-тега viewport",
+            detail=(
+                "Страница не объявляет, как её показывать на телефоне. "
+                "Google оценивает сайты по мобильной версии, поэтому это "
+                "влияет и на позиции, и на поведение посетителей."
+            ),
+            url=_url_of(page),
+        )]
+
+    v = head.viewport.lower()
+    # Запрет масштабирования — барьер доступности; поисковики это отмечают.
+    if "user-scalable=no" in v.replace(" ", "") or "maximum-scale=1" in v.replace(" ", ""):
+        return [Finding(
+            key="mobile.zoom_blocked",
+            layer=LAYER_ENHANCEMENT,
+            severity=LOW,
+            effort=EFFORT_TRIVIAL,
+            title="Запрещено увеличение на телефоне",
+            detail=(
+                "viewport запрещает масштабирование. Людям со слабым зрением "
+                "страницу не увеличить — это дефект доступности."
+            ),
+            url=_url_of(page),
+            evidence={"viewport": head.viewport},
+        )]
+    return []
+
+
+def rule_charset(page: dict[str, Any], head: HeadData,
+                 ctx: dict[str, Any]) -> list[Finding]:
+    """Объявленная кодировка. Особенно важно для кириллицы и диакритики."""
+    if not page_was_fetched(page):
+        return []
+    ctype = (page.get("content_type") or "").lower()
+    if head.charset or "charset=" in ctype:
+        return []
+    return [Finding(
+        key="encoding.charset_missing",
+        layer=LAYER_TECHNICAL,
+        severity=LOW,
+        effort=EFFORT_TRIVIAL,
+        title="Не объявлена кодировка страницы",
+        detail=(
+            "Ни в HTML, ни в заголовке ответа нет charset. Браузер и "
+            "поисковик угадывают её сами — на кириллице и румынской "
+            "диакритике это выдаёт «кракозябры»."
+        ),
+        url=_url_of(page),
+    )]
+
+
+def rule_robots_conflict(page: dict[str, Any], head: HeadData,
+                         ctx: dict[str, Any]) -> list[Finding]:
+    """Противоречивые директивы robots на одной странице.
+
+    Два тега robots — index и noindex — не «отменяют друг друга»: поисковик
+    выбирает самую строгую. Такое обычно рождается, когда SEO-плагин и тема
+    пишут мету независимо, и результат противоположен ожидаемому.
+    """
+    if not page_was_fetched(page):
+        return []
+    toks = head.robots_tokens
+    if "noindex" in toks and "index" in toks:
+        return [Finding(
+            key="robots.conflicting",
+            layer=LAYER_INDEXABILITY,
+            severity=HIGH,
+            effort=EFFORT_SMALL,
+            title="Противоречивые указания robots",
+            detail=(
+                "На странице одновременно index и noindex. Поисковик выберет "
+                "строгое — noindex, то есть страница выпадет из выдачи, хотя "
+                "по замыслу должна быть в ней. Обычно это спор SEO-плагина "
+                "и темы: мету пишут оба."
+            ),
+            url=_url_of(page),
+            evidence={"robots": head.robots_all},
+        )]
+    if len(head.robots_all) > 1:
+        return [Finding(
+            key="robots.duplicate_tag",
+            layer=LAYER_INDEXABILITY,
+            severity=LOW,
+            effort=EFFORT_SMALL,
+            title=f"Тег robots повторяется ({len(head.robots_all)} раза)",
+            detail=(
+                "Несколько мета-тегов robots на одной странице. Пока они не "
+                "противоречат друг другу, вреда нет, но это признак того, "
+                "что мету пишут два разных источника."
+            ),
+            url=_url_of(page),
+            evidence={"robots": head.robots_all},
+        )]
+    return []
+
+
+def rule_heading_hierarchy(page: dict[str, Any], head: HeadData,
+                           ctx: dict[str, Any]) -> list[Finding]:
+    """Пропущенные уровни заголовков: H1 → H3 без H2.
+
+    Заголовки — это оглавление страницы. Пропуск уровня ломает его и для
+    поисковика, и для программ чтения с экрана.
+    """
+    if not page_was_fetched(page):
+        return []
+    levels = page.get("heading_levels") or head.heading_levels or []
+    if len(levels) < 2:
+        return []
+
+    prev = levels[0]
+    for cur in levels[1:]:
+        if cur - prev >= 2:
+            return [Finding(
+                key="structure.heading_skip",
+                layer=LAYER_STRUCTURE,
+                severity=LOW,
+                effort=EFFORT_SMALL,
+                title=f"Пропущен уровень заголовка (H{prev} → H{cur})",
+                detail=(
+                    "После H{p} сразу идёт H{c}, минуя промежуточный уровень. "
+                    "Оглавление страницы получается рваным — это мешает и "
+                    "поисковику, и программам чтения с экрана."
+                ).format(p=prev, c=cur),
+                url=_url_of(page),
+                evidence={"levels": levels[:30]},
+            )]
+        prev = cur
+    return []
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ПРАВИЛА УРОВНЯ САЙТА — видят весь корпус сразу
 # ══════════════════════════════════════════════════════════════════════════
@@ -1003,6 +1262,262 @@ def site_rule_https_mixed(pages: list[dict[str, Any]], ctx: dict[str, Any]) -> l
     return []
 
 
+def _page_url(p: dict[str, Any]) -> str:
+    return (p.get("final_url") or p.get("url") or "").strip()
+
+
+def _norm(u: str) -> str:
+    """Ключ сравнения адресов: без якоря, без хвостового слеша, без query.
+
+    Внутренние ссылки почти всегда пишут по-разному (/about, /about/,
+    /about#team). Сравнивать их буквально — значит объявить сиротой каждую
+    вторую страницу, то есть завалить человека ложной работой.
+    """
+    if not u:
+        return ""
+    parts = urlsplit(u)
+    path = (parts.path or "/").rstrip("/") or "/"
+    return f"{parts.scheme}://{parts.netloc}{path}".lower()
+
+
+def site_rule_orphan_pages(pages: list[dict[str, Any]],
+                           ctx: dict[str, Any]) -> list[Finding]:
+    """Страницы, на которые не ведёт ни одна внутренняя ссылка.
+
+    Сирота может быть в карте сайта и прекрасно свёрстана, но вес по ней не
+    передаётся, и посетитель до неё не дойдёт иначе как из выдачи. Для
+    товара или услуги это тихая потеря: страница есть, а её будто нет.
+    """
+    if len(pages) < 4:
+        return []  # на трёх страницах разговор о структуре бессмысленен
+
+    linked: set[str] = set()
+    have_links = False
+    for p in pages:
+        links = p.get("links_internal") or []
+        if links:
+            have_links = True
+        for href in links:
+            linked.add(_norm(href))
+
+    # Если ссылок не собрано ВООБЩЕ — это не «весь сайт из сирот», а нехватка
+    # данных (старый прогон из БД, JS-навигация). Молчим: обвинять по
+    # неувиденному — ровно та ошибка, от которой защищает page_was_fetched.
+    if not have_links:
+        return []
+
+    orphans: list[str] = []
+    for p in pages:
+        url = _page_url(p)
+        if not url or p.get("noindex"):
+            continue
+        if (p.get("status") or 200) >= 400:
+            continue
+        key = _norm(url)
+        # Главную исключаем: на неё ведёт логотип, и почти всегда она корень.
+        if urlsplit(url).path.rstrip("/") in ("", "/"):
+            continue
+        if key not in linked:
+            orphans.append(url)
+
+    if not orphans:
+        return []
+
+    # Если «сиротами» оказалось почти всё — вероятнее сломан сбор ссылок,
+    # чем сайт. Понижаем до наблюдения, вместо того чтобы создавать
+    # десятки задач по подозрению.
+    ratio = len(orphans) / max(1, len(pages))
+    if ratio > 0.8:
+        return [Finding(
+            key="structure.orphan_suspect",
+            layer=LAYER_STRUCTURE,
+            severity=INFO,
+            effort=EFFORT_SMALL,
+            title=f"Внутренних ссылок почти не найдено ({len(orphans)} из {len(pages)} стр.)",
+            detail=(
+                "Практически ни на одну страницу не ведут ссылки с других "
+                "страниц. Чаще всего это означает, что меню собирается "
+                "скриптом и в HTML его нет — поисковик видит сайт так же. "
+                "Стоит проверить вручную, прежде чем считать это дефектом."
+            ),
+            url=orphans[0],
+            evidence={"orphans": orphans[:10], "pages": len(pages)},
+        )]
+
+    return [Finding(
+        key="structure.orphan_page",
+        layer=LAYER_STRUCTURE,
+        severity=MEDIUM,
+        effort=EFFORT_SMALL,
+        title=f"Страницы без внутренних ссылок ({len(orphans)} шт.)",
+        detail=(
+            "На эти страницы не ведёт ни одна ссылка с других страниц сайта. "
+            "Поисковик считает такие страницы второстепенными, а посетитель "
+            "до них просто не доходит. Достаточно добавить ссылку из меню, "
+            "из родительского раздела или из related-блока."
+        ),
+        url=orphans[0],
+        evidence={"urls": orphans[:20], "count": len(orphans)},
+    )]
+
+
+def site_rule_broken_internal_links(pages: list[dict[str, Any]],
+                                    ctx: dict[str, Any]) -> list[Finding]:
+    """Внутренние ссылки, ведущие на страницы с ошибкой.
+
+    Судим ТОЛЬКО те адреса, которые мы реально загружали и видели их код
+    ответа. Ссылку на неизвестный адрес объявлять битой нельзя — мы её не
+    проверяли.
+    """
+    status_by: dict[str, int] = {}
+    for p in pages:
+        url = _page_url(p)
+        st = p.get("status")
+        if url and isinstance(st, int):
+            status_by[_norm(url)] = st
+
+    if not status_by:
+        return []
+
+    broken: dict[str, list[str]] = {}
+    for p in pages:
+        src = _page_url(p)
+        for href in (p.get("links_internal") or []):
+            key = _norm(href)
+            st = status_by.get(key)
+            if st is not None and st >= 400:
+                broken.setdefault(href, [])
+                if src and src not in broken[href] and len(broken[href]) < 5:
+                    broken[href].append(src)
+
+    if not broken:
+        return []
+
+    targets = sorted(broken)
+    return [Finding(
+        key="structure.broken_internal_link",
+        layer=LAYER_STRUCTURE,
+        severity=HIGH,
+        effort=EFFORT_SMALL,
+        title=f"Внутренние ссылки на несуществующие страницы ({len(targets)} шт.)",
+        detail=(
+            "Ссылки внутри сайта ведут на страницы, отвечающие ошибкой. "
+            "Посетитель упирается в тупик, а поисковик тратит на это обход. "
+            "Нужно либо поправить адрес, либо убрать ссылку."
+        ),
+        url=targets[0],
+        evidence={
+            "targets": targets[:20],
+            "examples": {t: broken[t] for t in targets[:5]},
+            "count": len(targets),
+        },
+    )]
+
+
+def site_rule_click_depth(pages: list[dict[str, Any]],
+                          ctx: dict[str, Any]) -> list[Finding]:
+    """Страницы, до которых от главной больше трёх переходов.
+
+    Глубина считается по РЕАЛЬНОМУ графу ссылок обходом в ширину, а не по
+    числу слэшей в адресе: /shop/category/item может быть в одном клике из
+    меню, и наказывать за длинный путь было бы выдумкой.
+    """
+    if len(pages) < 8:
+        return []
+
+    by_key: dict[str, dict[str, Any]] = {}
+    for p in pages:
+        url = _page_url(p)
+        if url:
+            by_key[_norm(url)] = p
+
+    roots = [k for k, p in by_key.items()
+             if urlsplit(_page_url(p)).path.rstrip("/") in ("", "/")]
+    if not roots:
+        origin = (ctx.get("origin") or "").rstrip("/")
+        roots = [_norm(origin)] if origin and _norm(origin) in by_key else []
+    if not roots:
+        return []
+
+    depth: dict[str, int] = {r: 0 for r in roots}
+    queue = list(roots)
+    while queue:
+        cur = queue.pop(0)
+        page = by_key.get(cur)
+        if not page:
+            continue
+        for href in (page.get("links_internal") or []):
+            k = _norm(href)
+            if k in by_key and k not in depth:
+                depth[k] = depth[cur] + 1
+                queue.append(k)
+
+    # Недостижимые здесь не судим: это работа правила про сирот, и дублировать
+    # одну беду двумя задачами — значит удвоить человеку список дел.
+    deep = [(_page_url(by_key[k]), d) for k, d in depth.items() if d >= 4]
+    if not deep:
+        return []
+    deep.sort(key=lambda x: -x[1])
+    worst = deep[0][1]
+    return [Finding(
+        key="structure.deep_page",
+        layer=LAYER_STRUCTURE,
+        severity=LOW,
+        effort=EFFORT_MEDIUM,
+        title=f"Страницы глубже трёх переходов от главной ({len(deep)} шт.)",
+        detail=(
+            f"До самой дальней страницы нужно {worst} переходов от главной. "
+            "Чем глубже страница, тем реже её обходит поисковик и тем меньше "
+            "веса ей достаётся. Помогает ссылка из меню, хлебные крошки или "
+            "блок с рекомендациями."
+        ),
+        url=deep[0][0],
+        evidence={"pages": [{"url": u, "depth": d} for u, d in deep[:20]],
+                  "max_depth": worst},
+    )]
+
+
+def site_rule_link_dead_end(pages: list[dict[str, Any]],
+                            ctx: dict[str, Any]) -> list[Finding]:
+    """Страницы, с которых не ведёт ни одной внутренней ссылки."""
+    if len(pages) < 6:
+        return []
+    have_links = any(p.get("links_internal") for p in pages)
+    if not have_links:
+        return []
+
+    dead: list[str] = []
+    for p in pages:
+        url = _page_url(p)
+        if not url or p.get("noindex"):
+            continue
+        if (p.get("status") or 200) >= 400:
+            continue
+        # links_internal_total считает ВСЕ ссылки, включая обрезанные лимитом.
+        total = p.get("links_internal_total")
+        if total is None:
+            total = len(p.get("links_internal") or [])
+        if total == 0:
+            dead.append(url)
+
+    if not dead or len(dead) / max(1, len(pages)) > 0.8:
+        return []
+
+    return [Finding(
+        key="structure.dead_end",
+        layer=LAYER_STRUCTURE,
+        severity=LOW,
+        effort=EFFORT_SMALL,
+        title=f"Страницы-тупики без исходящих ссылок ({len(dead)} шт.)",
+        detail=(
+            "С этих страниц никуда нельзя перейти внутри сайта. Посетитель "
+            "дочитал и упёрся в стену, а вес страницы дальше не передаётся."
+        ),
+        url=dead[0],
+        evidence={"urls": dead[:20], "count": len(dead)},
+    )]
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # РЕЕСТР
 # ══════════════════════════════════════════════════════════════════════════
@@ -1021,6 +1536,12 @@ PAGE_RULES: tuple[Callable[..., list[Finding]], ...] = (
     rule_lang_declared,
     rule_lang_mismatch,
     rule_hreflang,
+    rule_robots_conflict,
+    rule_mobile_viewport,
+    rule_charset,
+    rule_heading_hierarchy,
+    rule_structured_data,
+    rule_open_graph,
 )
 
 SITE_RULES: tuple[Callable[..., list[Finding]], ...] = (
@@ -1029,6 +1550,10 @@ SITE_RULES: tuple[Callable[..., list[Finding]], ...] = (
     site_rule_canonical_clusters,
     site_rule_cache_masking,
     site_rule_https_mixed,
+    site_rule_orphan_pages,
+    site_rule_broken_internal_links,
+    site_rule_click_depth,
+    site_rule_link_dead_end,
 )
 
 
@@ -1056,6 +1581,14 @@ def all_rule_keys() -> list[str]:
         "i18n.hreflang_no_self", "i18n.hreflang_lang_absent",
         "duplicate.title", "duplicate.description",
         "cache.serving_stale", "cache.fully_cached",
+        "robots.conflicting", "robots.duplicate_tag",
+        "mobile.viewport_missing", "mobile.zoom_blocked",
+        "encoding.charset_missing",
+        "schema.missing", "schema.no_organization",
+        "social.og_missing", "social.og_image_missing",
+        "structure.heading_skip", "structure.orphan_page",
+        "structure.orphan_suspect", "structure.broken_internal_link",
+        "structure.deep_page", "structure.dead_end",
     })
 
 

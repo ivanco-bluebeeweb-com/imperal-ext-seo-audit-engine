@@ -54,6 +54,18 @@ def _flat_page(page_row: dict[str, Any], head: HeadData | None) -> dict[str, Any
             "html_lang": head.html_lang,
             "noindex": head.is_noindex,
             "word_count": head.word_count,
+            # Поля ниже нужны правилам УРОВНЯ САЙТА: граф внутренних ссылок
+            # (сироты, тупики, глубина) и разметка. Без них правило видит
+            # страницу как пустую и молчит — то есть его как бы нет.
+            "links_internal": list(head.links_internal or []),
+            "links_internal_total": head.links_internal_total,
+            "json_ld_types": list(head.json_ld_types or []),
+            "og_title": head.og_title,
+            "og_image": head.og_image,
+            "heading_levels": list(head.heading_levels or []),
+            # H1 нужен генератору правок: заголовок, написанный человеком,
+            # честнее слов, вытащенных из адреса страницы.
+            "h1": list(head.h1 or []),
         })
     return d
 

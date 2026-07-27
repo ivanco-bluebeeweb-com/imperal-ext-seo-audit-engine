@@ -30,6 +30,7 @@ from typing import Any
 from imperal_sdk import ui
 
 import bridge as br
+import schedule_settings as sched
 from app import ext
 
 # Человеческие подписи уровней. Английские коды движка в UI не место.
@@ -683,6 +684,263 @@ def _add_view(data: dict[str, Any]) -> Any:
     return ui.Stack(direction="v", gap=3, children=children)
 
 
+async def _load_fixes(ctx, host: str = "") -> dict[str, Any]:
+    """Готовые правки — по одному сайту или по всему портфелю.
+
+    Читает ту же базу, что и остальные экраны, но НЕ строит задачи: правки
+    выводятся из находок и страниц напрямую, и лишний проход по задачам был бы
+    работой ради работы.
+    """
+    try:
+        path = await br.download_db(ctx)
+    except Exception as exc:
+        await ctx.log(f"panel: storage read failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось получить данные. Попробуйте обновить."}
+    if not path:
+        return {"first_run": True}
+    try:
+        store = br.open_store(path)
+    except Exception as exc:
+        await ctx.log(f"panel: db unreadable: {type(exc).__name__}", "error")
+        return {"problem": "Данные аудита не читаются. Запустите аудит заново."}
+    try:
+        run_id = br.resolve_run(store, 0, site=host)
+        if not run_id:
+            return {"first_run": True}
+        rows, _tasks = br.site_rows(store, run_id)
+        if host:
+            row = br.match_site(rows, host)
+            if row is None:
+                return {"missing": br.host_label(host) or host}
+            rows = [row]
+        fixes: list[dict[str, Any]] = []
+        for row in rows:
+            fixes.extend(br.fixes_for_site(store, row))
+        return {"fixes": fixes, "summary": br.fixes_summary(fixes),
+                "scope": br.host_label(rows[0]["origin"]) if len(rows) == 1
+                         else "весь портфель"}
+    except Exception as exc:
+        await ctx.log(f"panel: fixes failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось собрать правки. Попробуйте обновить."}
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+
+
+async def _load_comparison(ctx, host: str) -> dict[str, Any]:
+    """Разница между двумя последними прогонами сайта."""
+    try:
+        path = await br.download_db(ctx)
+    except Exception as exc:
+        await ctx.log(f"panel: storage read failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось получить данные. Попробуйте обновить."}
+    if not path:
+        return {"first_run": True}
+    try:
+        store = br.open_store(path)
+    except Exception as exc:
+        await ctx.log(f"panel: db unreadable: {type(exc).__name__}", "error")
+        return {"problem": "Данные аудита не читаются. Запустите аудит заново."}
+    try:
+        after = br.latest_run_for_host(store, host)
+        if not after:
+            return {"missing": br.host_label(host) or host}
+        cmp = br.compare_runs(store, host, after_run=after)
+        if cmp is None:
+            return {"only_one": br.host_label(host) or host}
+        return {"cmp": cmp}
+    except Exception as exc:
+        await ctx.log(f"panel: compare failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось сравнить прогоны. Попробуйте обновить."}
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+
+
+def _side(text: str, *, empty: str = "—", width: int = 58) -> str:
+    """Значение поля для таблицы правок — с длиной, если оно обрезано.
+
+    ЗАЧЕМ ДЛИНА. Половина правок — это «сократить до рамки выдачи»: текст
+    остаётся тем же, меняется только хвост. В обрезанной колонке «сейчас» и
+    «станет» тогда выглядят ОДИНАКОВО, и экран будто предлагает заменить
+    строку на неё же. Показанная длина возвращает смысл: видно, что 167 знаков
+    стали 158, даже когда видимая часть совпадает.
+    """
+    t = (text or "").strip()
+    if not t:
+        return empty
+    if len(t) <= width:
+        return t
+    return f"{t[:width]}… ({len(t)} зн.)"
+
+
+def _short_url(url: str, *, width: int = 52) -> str:
+    """Адрес для таблицы: обрезаем СЛЕВА, а не справа.
+
+    У всех страниц одного сайта начало адреса одинаковое, поэтому обрезка с
+    конца оставляла бы столбец из повторяющегося домена — то есть ничего.
+    Смысл живёт в хвосте пути, его и показываем.
+    """
+    u = (url or "").strip()
+    if len(u) <= width:
+        return u
+    return "…" + u[-(width - 1):]
+
+
+def _fixes_view(data: dict[str, Any]) -> Any:
+    """Экран правок: не «что не так», а «на что поменять».
+
+    Готовые и требующие человека показаны ОДНОЙ таблицей с явной пометкой, а
+    не двумя списками: решение «это можно применить, а это нет» — главное, что
+    человек здесь читает, и прятать его в переключатель вкладок значит прятать
+    суть экрана.
+    """
+    fixes = data.get("fixes") or []
+    s = data.get("summary") or {}
+    scope = data.get("scope") or ""
+
+    if not fixes:
+        return ui.Stack(direction="v", gap=3, children=[
+            ui.Header("Правки", subtitle="Править нечего"),
+            ui.Empty(message="По текущим находкам значения полей нельзя "
+                             "вывести автоматически — либо править нечего."),
+            ui.Button(label="К портфелю", on_click=ui.Call("__panel__seo")),
+        ])
+
+    table = ui.DataTable(
+        columns=[
+            ui.DataColumn(key="state", label="Статус"),
+            ui.DataColumn(key="field", label="Поле"),
+            ui.DataColumn(key="page", label="Страница"),
+            ui.DataColumn(key="now", label="Сейчас"),
+            ui.DataColumn(key="next", label="Станет"),
+        ],
+        rows=[{
+            "state": "готово" if f.get("ready") else "нужен человек",
+            "field": {"meta_title": "Заголовок",
+                      "meta_description": "Описание",
+                      "canonical_url": "Канонический адрес",
+                      "robots": "robots"}.get(f.get("field"), f.get("field", "")),
+            "page": _short_url(f.get("url") or ""),
+            "now": _side(f.get("current") or ""),
+            "next": _side(f.get("proposed") or "", empty="— нужен человек"),
+        } for f in fixes[:80]],
+    )
+
+    return ui.Stack(direction="v", gap=3, children=[
+        ui.Header("Готовые правки",
+                  subtitle=f"{scope} · готовы к применению: {s.get('ready', 0)} "
+                           f"из {s.get('total', 0)} на {s.get('pages', 0)} страницах"),
+        table,
+        ui.Text(content="Применить: скажите в чате «примени правки» — их внесёт "
+                        "коннектор сайта, по подтверждению. Аудит сам ничего на "
+                        "сайтах не меняет.",
+                variant="caption"),
+        ui.Row(gap=2, children=[
+            ui.Button(label="К портфелю", on_click=ui.Call("__panel__seo")),
+            ui.Button(label="Задачи", variant="ghost",
+                      on_click=ui.Call("__panel__seo", view="tasks")),
+        ]),
+    ])
+
+
+def _comparison_view(cmp: Any) -> Any:
+    """Экран сравнения. Появившееся — первым: ради него всё и затевалось."""
+    def rows_of(items, mark):
+        return [{
+            "change": mark,
+            "severity": SEV_LABEL.get(ch.severity, ch.severity),
+            "what": (ch.message or ch.rule)[:70],
+            "page": (ch.url or "")[:55],
+        } for ch in items[:25]]
+
+    rows = (rows_of(cmp.appeared, "появилось")
+            + rows_of(cmp.fixed, "починено")
+            + rows_of(cmp.remains, "осталось"))
+
+    blocks: list[Any] = [
+        ui.Header(f"Изменения: {br.host_label(cmp.origin)}",
+                  subtitle=f"прогон #{cmp.before_run} → #{cmp.after_run} · "
+                           f"оценка {cmp.before_score} → {cmp.after_score}"),
+    ]
+    if cmp.appeared:
+        blocks.append(ui.Alert(
+            type="warning",
+            message=f"Появилось нового: {len(cmp.appeared)}. Этого в прошлый "
+                    f"раз не было — в общем списке такое незаметно."))
+    if cmp.caveat:
+        blocks.append(ui.Alert(type="info", message=cmp.caveat))
+
+    blocks.append(ui.DataTable(
+        columns=[
+            ui.DataColumn(key="change", label="Что произошло"),
+            ui.DataColumn(key="severity", label="Важность"),
+            ui.DataColumn(key="what", label="Дефект"),
+            ui.DataColumn(key="page", label="Страница"),
+        ],
+        rows=rows,
+    ))
+    blocks.append(ui.Row(gap=2, children=[
+        ui.Button(label="К портфелю", on_click=ui.Call("__panel__seo")),
+        ui.Button(label="Все сайты", variant="ghost",
+                  on_click=ui.Call("__panel__seo", view="sites")),
+    ]))
+    return ui.Stack(direction="v", gap=3, children=blocks)
+
+
+def _schedule_view(d: dict[str, Any]) -> Any:
+    """Экран расписания — форма, а не инструкция «напишите в чат».
+
+    Час и дни задаются выбором, а не текстом: строка «пн,чт» требует от
+    человека угадать формат, а от панели — разбирать опечатки.
+    """
+    enabled = bool(d.get("enabled"))
+    return ui.Stack(direction="v", gap=3, children=[
+        ui.Header("Автоматический аудит",
+                  subtitle=sched.describe(d)),
+        ui.Text(content=("Аудит ходит по чужим серверам, поэтому по умолчанию "
+                         "он выключен и запускается ночью. Утром приходит не "
+                         "повторный отчёт, а РАЗНИЦА с прошлым разом."),
+                variant="caption"),
+        # ИМЕНА ПОЛЕЙ = ИМЕНА ПАРАМЕТРОВ `set_schedule`. Значение доходит до
+        # инструмента только по `param_name`; расхождение здесь означало бы
+        # форму, которая нажимается и молча ничего не меняет.
+        ui.Form(
+            action="set_schedule",
+            submit_label="Сохранить расписание",
+            children=[
+                ui.Toggle(label="Включить автоматический аудит",
+                          value=enabled, param_name="enabled"),
+                ui.Text(content="Час запуска (UTC)", variant="caption"),
+                ui.Select(
+                    param_name="hour",
+                    value=str(int(d.get("hour", 3))),
+                    options=[{"value": str(h), "label": f"{h:02d}:00"}
+                             for h in range(24)],
+                ),
+                ui.Text(content="Дни недели: 1=понедельник … 7=воскресенье",
+                        variant="caption"),
+                ui.Input(param_name="days",
+                         value=str(d.get("days") or "1"),
+                         placeholder="например 1 или 1,4"),
+                ui.Text(content="Сайты — пусто означает «как в прошлый раз»",
+                        variant="caption"),
+                ui.Input(param_name="sites",
+                         value=str(d.get("sites") or ""),
+                         placeholder="climtec.md, example.com"),
+                ui.Text(content="Страниц на сайт", variant="caption"),
+                ui.Input(param_name="max_pages", type="number",
+                         value=str(int(d.get("max_pages", 50)))),
+            ],
+        ),
+        ui.Button(label="К портфелю", on_click=ui.Call("__panel__seo")),
+    ])
+
+
 @ext.panel("seo", slot="center", title="SEO-аудит", icon="Search",
            center_overlay=True, refresh="manual")
 async def seo_center(ctx, **kwargs):
@@ -735,6 +993,45 @@ async def seo_center(ctx, **kwargs):
                 f"возможно, он ещё не проверялся.",
                 kind="info", back_to_sites=True)
         return _site_view(site_data["detail"])
+
+    if view == "fixes":
+        # Правки читаются СВОИМ путём: экрану не нужны ни задачи, ни сводка
+        # портфеля, и общий `_load` заставил бы его платить за чужую работу.
+        host = str(kwargs.get("site") or kwargs.get("host") or "").strip()
+        fx = await _load_fixes(ctx, host)
+        if fx.get("problem"):
+            return _banner(fx["problem"])
+        if fx.get("first_run"):
+            return _first_run()
+        if fx.get("missing"):
+            return _banner(
+                f"Сайта «{fx['missing']}» в результатах аудита нет.",
+                kind="info", back_to_sites=True)
+        return _fixes_view(fx)
+
+    if view == "compare":
+        host = str(kwargs.get("site") or kwargs.get("host") or "").strip()
+        if not host:
+            return _banner("Не указан сайт: сравнение всегда по одному сайту.",
+                           kind="info", back_to_sites=True)
+        cd = await _load_comparison(ctx, host)
+        if cd.get("problem"):
+            return _banner(cd["problem"])
+        if cd.get("first_run"):
+            return _first_run()
+        if cd.get("missing"):
+            return _banner(f"Сайта «{cd['missing']}» в результатах аудита нет.",
+                           kind="info", back_to_sites=True)
+        if cd.get("only_one"):
+            # Не сбой, а честное состояние: сравнивать пока не с чем.
+            return _banner(
+                f"У сайта «{cd['only_one']}» пока один аудит. Запустите "
+                f"проверку ещё раз после правок — покажу, что изменилось.",
+                kind="info", back_to_sites=True)
+        return _comparison_view(cd["cmp"])
+
+    if view == "schedule":
+        return _schedule_view(await sched.get_settings(ctx))
 
     if view == "sites":
         sites_data = await _load_sites(
@@ -819,7 +1116,16 @@ async def seo_nav(ctx, **kwargs):
                       full_width=True, on_click=ui.Call("__panel__seo")),
             ui.Button(label="Задачи", variant="ghost", full_width=True,
                       on_click=ui.Call("__panel__seo", view="tasks")),
+            ui.Button(label="Готовые правки", variant="ghost",
+                      full_width=True,
+                      on_click=ui.Call("__panel__seo", view="fixes")),
         ]
+
+    # Расписание видно ВСЕГДА, как и «добавить сайт»: настроить ночной аудит
+    # осмысленно и до первого прогона, и когда база не читается.
+    extra.append(
+        ui.Button(label="Расписание", variant="ghost", full_width=True,
+                  on_click=ui.Call("__panel__seo", view="schedule")))
 
     children.append(ui.Text(content=state, variant="caption"))
     children.extend(extra)

@@ -35,6 +35,10 @@ from typing import Any
 
 # Движок лежит рядом как обычный пакет — расширение его ИМПОРТИРУЕТ, а не
 # копирует логику: правило аудита правится в одном месте.
+# `with_scheme` живёт В ДВИЖКЕ, а не здесь: ту же догадку о схеме должен
+# делать и CLI. Две копии одного решения разъехались бы при первой же правке —
+# и именно так баг с «https:climtec.md» уцелел в CLI, пока платформа была цела.
+from seoaudit.discover import with_scheme  # noqa: F401  (реэкспорт для инструментов)
 from seoaudit.engine import AuditConfig, Engine
 from seoaudit.fetcher import FetchPolicy
 from seoaudit.reports import host_of, portfolio_report_md, site_report_md
@@ -42,6 +46,8 @@ from seoaudit.severity import CRITICAL, HIGH, LAYER_NAMES, SEVERITY_ORDER
 from seoaudit.store import Store
 from seoaudit.tasks import build_tasks
 from seoaudit.export_tracker import plan_for_tracker, summarise_plan
+from seoaudit.compare import compare_findings, summarise as summarise_comparison
+from seoaudit.fixes import build_fixes
 
 # Коллекция сводок прогонов в ctx.store — быстрые ответы без скачивания базы.
 RUNS_COLLECTION = "seo_runs"
@@ -77,28 +83,6 @@ def parse_sites(raw: str) -> list[str]:
             seen.add(key)
             out.append(with_scheme(item))
     return out
-
-
-def with_scheme(site: str) -> str:
-    """Дописать https://, если человек назвал домен без схемы.
-
-    ЗАЧЕМ ЭТО ЗДЕСЬ. `normalize_url` внутри движка опирается на `urlsplit`, а
-    тот в строке `climtec.md` видит ПУТЬ, а не хост: hostname пустой, и функция
-    честно возвращает ввод как есть. Дальше движок склеивал схему с таким
-    «origin» и получалось `https:///climtec.md` — три слэша, и сайт становился
-    неоткрываемым.
-
-    Починка сделана на границе ВВОДА, а не внутри движка: `normalize_url`
-    применяется и к ссылкам, найденным на страницах, где голая строка без схемы
-    — это действительно относительный путь, и додумывать ей схему было бы
-    ошибкой. Схему домысливаем ровно там, где человек ввёл домен руками.
-    """
-    s = (site or "").strip()
-    if not s:
-        return ""
-    if s.startswith(("http://", "https://")):
-        return s
-    return "https://" + s.lstrip("/")
 
 
 async def download_db(ctx) -> str | None:
@@ -684,3 +668,139 @@ def latest_run_for_host(store: Store, host: str) -> int | None:
         [needle],
     ).fetchone()
     return int(row["run_id"]) if row else None
+
+
+# ── Правки: находки -> конкретные значения полей ──────────────────────────
+
+def fixes_for_site(store: Store, site_row: dict[str, Any],
+                   *, only_ready: bool = False) -> list[dict[str, Any]]:
+    """Готовые правки по одному сайту.
+
+    Собирает то, чего между аудитом и починкой всегда не хватало: не «нет
+    описания на восьми страницах», а «страница X, поле Y, значение Z».
+
+    `head` в БД лежит JSON-СТРОКОЙ — та же ловушка, что в движке при resume.
+    Без разбора генератор получил бы пустые страницы и предложил бы собирать
+    заголовки из адресов там, где на странице есть человеческий H1.
+    """
+    pages: dict[str, dict[str, Any]] = {}
+    for row in store.pages(site_row["id"], only_done=True):
+        d = dict(row)
+        raw = d.get("head")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = {}
+        if isinstance(raw, dict):
+            for k in ("title", "description", "canonical", "h1", "html_lang",
+                      "og_title"):
+                if k in raw:
+                    d[k] = raw[k]
+        key = d.get("final_url") or d.get("url") or ""
+        if key:
+            pages[key] = d
+
+    findings = [dict(f) for f in store.findings(site_row["id"])]
+    items = build_fixes(findings, pages, site_row.get("origin", ""))
+    if only_ready:
+        items = [f for f in items if f.ready]
+    return [f.to_dict() for f in items]
+
+
+def fixes_summary(fix_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Сводка по правкам — для заголовка ответа.
+
+    Считается по УЖЕ преобразованным словарям, а не по объектам: правки могли
+    прийти из нескольких сайтов и быть склеены, и пересобирать из них объекты
+    ради подсчёта — лишний повод разойтись двум формам одних данных.
+    """
+    by_field: dict[str, int] = {}
+    for f in fix_rows:
+        key = f.get("field", "")
+        by_field[key] = by_field.get(key, 0) + 1
+    ready = [f for f in fix_rows if f.get("ready")]
+    return {
+        "total": len(fix_rows),
+        "ready": len(ready),
+        "needs_review": len(fix_rows) - len(ready),
+        "pages": len({f.get("url", "") for f in fix_rows}),
+        "by_field": by_field,
+    }
+
+
+# ── Сравнение прогонов ────────────────────────────────────────────────────
+
+def previous_run_for_site(store: Store, host: str, before_run: int) -> int | None:
+    """Прогон того же сайта, предшествующий указанному.
+
+    Ищем по НОРМАЛИЗОВАННОМУ хосту, а не по origin: между прогонами сайт
+    мог переехать с http на https или начать отвечать с www. Сравнивать
+    такие прогоны нужно — это один и тот же сайт, и как раз переезд стоит
+    увидеть в изменениях, а не потерять как «нет прошлого прогона».
+    """
+    needle = host_label(host)
+    if not needle:
+        return None
+    row = store.db.execute(
+        f"""
+        SELECT s.run_id AS run_id
+        FROM sites s
+        JOIN runs r ON r.id = s.run_id
+        WHERE {_SQL_HOST} = ? AND s.run_id < ?
+        ORDER BY r.started_at DESC, s.id DESC
+        LIMIT 1
+        """,
+        [needle, before_run],
+    ).fetchone()
+    return int(row["run_id"]) if row else None
+
+
+def site_in_run(store: Store, host: str, run_id: int) -> dict[str, Any] | None:
+    """Строка сайта в конкретном прогоне — по нормализованному хосту."""
+    needle = host_label(host)
+    if not needle:
+        return None
+    row = store.db.execute(
+        f"""
+        SELECT s.id AS id, s.origin AS origin, s.state AS state
+        FROM sites s
+        WHERE {_SQL_HOST} = ? AND s.run_id = ?
+        LIMIT 1
+        """,
+        [needle, run_id],
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def compare_runs(store: Store, host: str, *, after_run: int,
+                 before_run: int = 0):
+    """Сравнение двух прогонов одного сайта. Возвращает Comparison или None."""
+    after_site = site_in_run(store, host, after_run)
+    if after_site is None:
+        return None
+
+    if not before_run:
+        prev = previous_run_for_site(store, host, after_run)
+        if prev is None:
+            return None
+        before_run = prev
+
+    before_site = site_in_run(store, host, before_run)
+    if before_site is None:
+        return None
+
+    before_pages = store.count_pages(before_site["id"])
+    after_pages = store.count_pages(after_site["id"])
+
+    return compare_findings(
+        [dict(f) for f in store.findings(before_site["id"])],
+        [dict(f) for f in store.findings(after_site["id"])],
+        origin=after_site["origin"],
+        before_run=before_run,
+        after_run=after_run,
+        before_score=store.site_score(before_site["id"], before_pages),
+        after_score=store.site_score(after_site["id"], after_pages),
+        before_pages=before_pages,
+        after_pages=after_pages,
+    )

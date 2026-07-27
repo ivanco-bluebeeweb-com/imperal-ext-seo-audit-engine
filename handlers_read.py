@@ -20,11 +20,15 @@ import bridge as br
 import codes as c
 from app import chat
 from models import (
+    AuditComparison,
     AuditTask,
+    CompareParams,
     ConnectedSite,
     ExportPlan,
     ExportPlanParams,
     Finding,
+    FixPlan,
+    FixPlanParams,
     GetReportParams,
     ListConnectedParams,
     ListFindingsParams,
@@ -524,5 +528,162 @@ async def export_plan(ctx, params: ExportPlanParams) -> ActionResult:
             f"План готов: {s['tasks']} задач по {s['sites']} сайтам. "
             f"Разделы — {sections}. Скажите, куда выгрузить: Asana или Notion.",
         )
+    finally:
+        store.close()
+
+
+@chat.function(
+    "fix_plan",
+    "Показать готовые правки по итогам аудита: для каждой страницы — какое "
+    "поле и на какое значение поменять. Сам план ничего не меняет: правки "
+    "применяет коннектор сайта по подтверждению.",
+    action_type="read",
+    data_model=FixPlan,
+)
+async def fix_plan(ctx, params: FixPlanParams) -> ActionResult:
+    """Находки -> конкретные значения полей.
+
+    Между «нет описания на восьми страницах» и починкой лежит работа:
+    решить, ЧТО написать. Здесь она сделана заранее и по данным самой
+    страницы, а где честно вывести значение нельзя — правка помечена как
+    требующая человека, а не заполнена правдоподобным мусором.
+    """
+    store, _run, err = await open_portfolio(ctx)
+    if err:
+        return err
+    try:
+        run_id = br.resolve_run(store, params.run_id, site=params.site or "")
+        if not run_id:
+            return _error(
+                f"Прогон #{params.run_id} не найден.", c.SEO_RUN_NOT_FOUND)
+
+        rows, _tasks = br.site_rows(store, run_id)
+        if params.site:
+            row = br.match_site(rows, params.site)
+            if row is None:
+                return _error(
+                    f"Сайта «{params.site}» в этом прогоне нет.",
+                    c.SEO_SITE_NOT_FOUND,
+                )
+            rows = [row]
+
+        fixes: list[dict] = []
+        for row in rows:
+            fixes.extend(
+                br.fixes_for_site(store, row, only_ready=params.only_ready))
+
+        s = br.fixes_summary(fixes)
+        shown = fixes[: params.limit]
+
+        if not fixes:
+            return ActionResult.success(
+                FixPlan(id=f"run-{run_id}", title="Править нечего",
+                        kind="seo_fix_plan"),
+                "Готовых правок нет — по этим находкам значения полей "
+                "нельзя вывести автоматически.",
+            )
+
+        scope = br.host_label(rows[0]["origin"]) if len(rows) == 1 else "портфель"
+        entity = FixPlan(
+            id=f"run-{run_id}",
+            title=f"Правки: {s['ready']} готовы к применению",
+            subtitle=f"{scope} · {s['pages']} страниц · {s['total']} правок",
+            kind="seo_fix_plan",
+            total=s["total"],
+            ready=s["ready"],
+            needs_review=s["needs_review"],
+            pages=s["pages"],
+            by_field=s["by_field"],
+            fixes=shown,
+        )
+        fields = ", ".join(f"{k}: {v}" for k, v in s["by_field"].items())
+        tail = ""
+        if s["needs_review"]:
+            tail = (f" Ещё {s['needs_review']} требуют вашего решения — "
+                    f"там значение нельзя вывести честно.")
+        return ActionResult.success(
+            entity,
+            f"{s['ready']} правок готовы к применению на {s['pages']} "
+            f"страницах ({fields}).{tail} Скажите «применяй» — внесу их "
+            f"через коннектор сайта.",
+        )
+    finally:
+        store.close()
+
+
+@chat.function(
+    "compare_audits",
+    "Сравнить два аудита одного сайта: что починилось, что осталось и что "
+    "ПОЯВИЛОСЬ нового. Появившееся — регрессия: в общем списке её не видно.",
+    action_type="read",
+    data_model=AuditComparison,
+)
+async def compare_audits(ctx, params: CompareParams) -> ActionResult:
+    """Изменения между двумя прогонами.
+
+    Отдельный инструмент, а не флаг отчёта: отчёт отвечает «что не так»,
+    сравнение — «стало ли лучше». Второй вопрос человек задаёт ПОСЛЕ работы,
+    и ответ на него другой по структуре.
+    """
+    store, _run, err = await open_portfolio(ctx)
+    if err:
+        return err
+    try:
+        after_run = params.after_run
+        if not after_run:
+            found = br.latest_run_for_host(store, params.site)
+            if not found:
+                return _error(
+                    f"Сайт «{params.site}» ни в одном аудите не встречался.",
+                    c.SEO_SITE_NOT_FOUND,
+                )
+            after_run = found
+
+        cmp = br.compare_runs(store, params.site, after_run=after_run,
+                              before_run=params.before_run)
+        if cmp is None:
+            return ActionResult.success(
+                AuditComparison(
+                    id=f"cmp-{params.site}", kind="seo_comparison",
+                    title="Сравнивать не с чем", site=params.site,
+                    after_run=after_run,
+                ),
+                f"У сайта «{params.site}» только один аудит — сравнивать не с "
+                f"чем. Запустите проверку ещё раз после правок, и я покажу, "
+                f"что изменилось.",
+            )
+
+        d = cmp.to_dict()
+        head = br.summarise_comparison(cmp)
+        entity = AuditComparison(
+            id=f"cmp-{cmp.after_run}-{cmp.before_run}",
+            kind="seo_comparison",
+            title=head,
+            subtitle=f"{br.host_label(cmp.origin)} · прогон "
+                     f"#{cmp.before_run} → #{cmp.after_run}",
+            site=br.host_label(cmp.origin),
+            before_run=cmp.before_run,
+            after_run=cmp.after_run,
+            before_score=cmp.before_score,
+            after_score=cmp.after_score,
+            score_delta=cmp.score_delta,
+            fixed_count=len(cmp.fixed),
+            remains_count=len(cmp.remains),
+            appeared_count=len(cmp.appeared),
+            reliable=cmp.reliable,
+            caveat=cmp.caveat,
+            fixed=d["fixed"][:50],
+            appeared=d["appeared"][:50],
+            remains=d["remains"][:50],
+        )
+
+        message = head
+        if cmp.appeared:
+            worst = cmp.appeared[0]
+            message += (f" Появилось новое, чего раньше не было — например: "
+                        f"{worst.message or worst.rule}.")
+        if cmp.caveat:
+            message += f" {cmp.caveat}"
+        return ActionResult.success(entity, message)
     finally:
         store.close()
