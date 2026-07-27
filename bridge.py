@@ -375,6 +375,25 @@ SITES_PAGE = 50          # сколько сайтов на странице п�
 SITES_PAGE_MAX = 200     # предохранитель: не отдаём в UI неограниченную выборку
 
 
+# Домен из origin средствами SQLite — ровно та же нормализация, что делает
+# host_label() в Python: снять схему, лишние слэши и www.
+#
+# Зачем это в SQL. Группировать список по `origin` НЕЛЬЗЯ: живой вызов показал
+# climtec.md ДВАЖДЫ — записями `https://climtec.md/` и `https:///climtec.md`
+# (след раннего бага с доменом без схемы; данные в базе остались). Для человека
+# это ОДИН подключённый сайт. Считать и группировать в Python значило бы
+# выгрузить весь портфель, чтобы посчитать его размер, — то есть потерять всю
+# постраничность.
+_SQL_HOST = (
+    "rtrim("
+    "  ltrim("
+    "    replace(replace(replace(lower(s.origin),'https://',''),'http://',''),'///','')"
+    "  , '/')"
+    ", '/')"
+)
+_SQL_HOST = f"CASE WHEN {_SQL_HOST} LIKE 'www.%' THEN substr({_SQL_HOST}, 5) ELSE {_SQL_HOST} END"
+
+
 def connected_sites(
     store: Store,
     *,
@@ -397,7 +416,7 @@ def connected_sites(
     where = ""
     params: list[Any] = []
     if query:
-        where = "WHERE s.origin LIKE ? ESCAPE '\\'"
+        where = f"WHERE {_SQL_HOST} LIKE ? ESCAPE '\\'"
         needle = str(query).strip().lower()
         for ch in ("\\", "%", "_"):      # экранируем метасимволы LIKE
             needle = needle.replace(ch, "\\" + ch)
@@ -405,37 +424,55 @@ def connected_sites(
 
     db = store.db
     total = db.execute(
-        f"SELECT COUNT(DISTINCT s.origin) FROM sites s {where}", params
+        f"SELECT COUNT(DISTINCT {_SQL_HOST}) FROM sites s {where}", params
     ).fetchone()[0]
 
-    # Одна строка на origin: последний прогон, в котором сайт встречался,
-    # его состояние в этом прогоне и суммарное число проверенных страниц.
+    # Одна строка на ДОМЕН (не на origin и не на запись таблицы).
+    #
+    # `sites` привязана к run_id, поэтому домен, проверенный трижды, лежит тремя
+    # записями; плюс один и тот же сайт мог попасть в базу как
+    # `https://climtec.md/` и как `https:///climtec.md`. Группировка по
+    # нормализованному домену сводит всё это в одну строку — «подключённый
+    # сайт» в понимании человека.
+    #
+    # Состояние, ошибка и id берутся из САМОГО СВЕЖЕГО прогона этого домена:
+    # в списке важно, как сайт чувствует себя сейчас, а не как год назад.
     rows = db.execute(
         f"""
+        WITH norm AS (
+            SELECT
+                s.id           AS site_id,
+                s.origin       AS origin,
+                s.state        AS state,
+                s.error        AS error,
+                s.run_id       AS run_id,
+                {_SQL_HOST}    AS host,
+                r.started_at   AS started_at
+            FROM sites s
+            JOIN runs r ON r.id = s.run_id
+            {where}
+        ),
+        ranked AS (
+            SELECT norm.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY host ORDER BY started_at DESC, site_id DESC
+                   ) AS rn
+            FROM norm
+        )
         SELECT
-            s.origin                                   AS origin,
-            MAX(r.started_at)                          AS last_seen,
-            COUNT(DISTINCT s.run_id)                   AS runs,
-            (SELECT s2.state FROM sites s2
-              JOIN runs r2 ON r2.id = s2.run_id
-             WHERE s2.origin = s.origin
-             ORDER BY r2.started_at DESC LIMIT 1)      AS state,
-            (SELECT s3.error FROM sites s3
-              JOIN runs r3 ON r3.id = s3.run_id
-             WHERE s3.origin = s.origin
-             ORDER BY r3.started_at DESC LIMIT 1)      AS error,
-            (SELECT s4.id FROM sites s4
-              JOIN runs r4 ON r4.id = s4.run_id
-             WHERE s4.origin = s.origin
-             ORDER BY r4.started_at DESC LIMIT 1)      AS last_site_id
-        FROM sites s
-        JOIN runs r ON r.id = s.run_id
-        {where}
-        GROUP BY s.origin
+            host,
+            MAX(started_at)                AS last_seen,
+            COUNT(DISTINCT run_id)         AS runs,
+            MAX(CASE WHEN rn = 1 THEN origin  END) AS origin,
+            MAX(CASE WHEN rn = 1 THEN state   END) AS state,
+            MAX(CASE WHEN rn = 1 THEN error   END) AS error,
+            MAX(CASE WHEN rn = 1 THEN site_id END) AS last_site_id
+        FROM ranked
+        GROUP BY host
         ORDER BY
             CASE WHEN state = 'done' THEN 1 ELSE 0 END,  -- проблемные сверху
             last_seen DESC,
-            s.origin
+            host
         LIMIT ? OFFSET ?
         """,
         [*params, limit, offset],
@@ -447,7 +484,7 @@ def connected_sites(
         pages = store.count_pages(site_id) if site_id else 0
         out.append({
             "origin": row["origin"],
-            "host": host_label(row["origin"]),
+            "host": row["host"] or host_label(row["origin"] or ""),
             "state": row["state"] or "pending",
             "error": row["error"] or "",
             "runs": int(row["runs"] or 0),

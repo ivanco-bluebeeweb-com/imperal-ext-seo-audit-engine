@@ -349,3 +349,49 @@ async def test_empty_search_is_success_not_failure(ctx, monkeypatch, big_db):
     result = await hr.list_connected_sites(ctx, ListConnectedParams(query="нетакогосайта"))
     assert result.status == "success"
     assert result.error_code == ""
+
+
+# --- один сайт = одна строка -------------------------------------------------
+
+def test_the_same_site_written_differently_is_one_row(tmp_path):
+    """Одна площадка, записанная по-разному, — ОДНА строка списка.
+
+    Найдено на живом портфеле: climtec.md показывался ДВАЖДЫ — записями
+    `https://climtec.md/` и `https:///climtec.md`. Второй origin — след раннего
+    бага с доменом без схемы: сам баг починен на входе, но данные в базе
+    остались, и список честно показывал два «разных» сайта.
+
+    Для человека это один подключённый сайт. Поэтому группировка идёт по
+    нормализованному домену (без схемы, лишних слэшей и www), а не по origin.
+    Нормализация живёт в SQL сознательно: считать её в Python значило бы
+    выгрузить весь портфель, чтобы узнать его размер, — то есть потерять
+    постраничность, ради которой всё и делалось.
+    """
+    from seoaudit.store import Store
+
+    store = Store(str(tmp_path / "dup.db"))
+    try:
+        for i, origin in enumerate(("https://climtec.md/",
+                                    "https:///climtec.md",
+                                    "https://www.climtec.md")):
+            run_id = store.create_run(label=f"прогон {i}")
+            store.set_site_state(store.add_site(run_id, origin), "done")
+            store.finish_run(run_id)
+
+        run_id = store.create_run(label="другой")
+        store.set_site_state(store.add_site(run_id, "https://g4s.md"), "done")
+        store.finish_run(run_id)
+
+        rows, total = br.connected_sites(store)
+        hosts = sorted(r["host"] for r in rows)
+
+        assert total == 2, f"один сайт посчитан несколько раз: {hosts}"
+        assert hosts == ["climtec.md", "g4s.md"]
+
+        climtec = next(r for r in rows if r["host"] == "climtec.md")
+        assert climtec["runs"] == 3, "проверки одного сайта должны сложиться"
+
+        # поиск тоже обязан считать это одним сайтом
+        assert br.connected_sites(store, query="climtec")[1] == 1
+    finally:
+        store.close()
