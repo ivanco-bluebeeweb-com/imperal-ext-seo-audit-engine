@@ -203,7 +203,8 @@ async def list_sites(ctx, params: ListFindingsParams) -> ActionResult:
     if err:
         return err
     try:
-        run_id = br.resolve_run(store, params.run_id)
+        run_id = br.resolve_run(store, params.run_id,
+                                site=getattr(params, "site", "") or "")
         if not run_id:
             return _error(
                 f"Прогон #{params.run_id} не найден. Посмотрите список аудитов.",
@@ -263,7 +264,8 @@ async def list_findings(ctx, params: ListFindingsParams) -> ActionResult:
     if err:
         return err
     try:
-        run_id = br.resolve_run(store, params.run_id)
+        run_id = br.resolve_run(store, params.run_id,
+                                site=getattr(params, "site", "") or "")
         if not run_id:
             return _error(
                 f"Прогон #{params.run_id} не найден.", c.SEO_RUN_NOT_FOUND)
@@ -338,7 +340,8 @@ async def list_tasks(ctx, params: ListTasksParams) -> ActionResult:
     if err:
         return err
     try:
-        run_id = br.resolve_run(store, params.run_id)
+        run_id = br.resolve_run(store, params.run_id,
+                                site=getattr(params, "site", "") or "")
         if not run_id:
             return _error(
                 f"Прогон #{params.run_id} не найден.", c.SEO_RUN_NOT_FOUND)
@@ -408,7 +411,8 @@ async def get_report(ctx, params: GetReportParams) -> ActionResult:
     if err:
         return err
     try:
-        run_id = br.resolve_run(store, params.run_id)
+        run_id = br.resolve_run(store, params.run_id,
+                                site=getattr(params, "site", "") or "")
         if not run_id:
             return _error(
                 f"Прогон #{params.run_id} не найден.", c.SEO_RUN_NOT_FOUND)
@@ -475,7 +479,8 @@ async def export_plan(ctx, params: ExportPlanParams) -> ActionResult:
     if err:
         return err
     try:
-        run_id = br.resolve_run(store, params.run_id)
+        run_id = br.resolve_run(store, params.run_id,
+                                site=getattr(params, "site", "") or "")
         if not run_id:
             return _error(
                 f"Прогон #{params.run_id} не найден.", c.SEO_RUN_NOT_FOUND)

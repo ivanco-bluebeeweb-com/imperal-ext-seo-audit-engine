@@ -228,3 +228,105 @@ def test_every_error_path_carries_a_code():
                     offenders.append(f"{path.name}:{node.lineno} _error без кода")
 
     assert not offenders, "пути ошибок без структурного кода: " + "; ".join(offenders)
+
+
+# --- сайт живёт не только в последнем прогоне --------------------------------
+
+def _two_runs_db(tmp_path) -> str:
+    """База: climtec.md проверен в СТАРОМ прогоне, другой сайт — в новом.
+
+    Ровно то, что было на живом портфеле: аудит запускают по одному сайту,
+    и «последний прогон вообще» уже не содержит того сайта, про который
+    спрашивают.
+    """
+    from seoaudit.store import Store
+
+    path = str(tmp_path / "two.db")
+    store = Store(path)
+
+    old = store.create_run(label="старый прогон")
+    site_id = store.add_site(old, "https://climtec.md")
+    store.set_site_state(site_id, "done")
+    store.queue_urls(site_id, ["https://climtec.md/"], "seed")
+    for page in store.pending_pages(site_id):
+        store.save_page_result(page["id"], {
+            "state": "done", "status": 200, "final_url": "https://climtec.md/",
+            "content_type": "text/html", "bytes": 2048, "head": {},
+        })
+    store.add_findings(site_id, [{
+        "rule": "meta.title_missing", "severity": "high", "layer": 3,
+        "effort": 1, "url": "https://climtec.md/", "message": "Нет заголовка",
+        "detail": "", "evidence": {},
+    }])
+    store.finish_run(old)
+
+    new = store.create_run(label="новый прогон")
+    other = store.add_site(new, "https://g4s.md")
+    store.set_site_state(other, "done")
+    store.finish_run(new)
+
+    store.close()
+    return path
+
+
+@pytest.mark.parametrize("tool_name,params_name", [
+    ("get_report", "GetReportParams"),
+    ("list_findings", "ListFindingsParams"),
+    ("list_tasks", "ListTasksParams"),
+    ("export_plan", "ExportPlanParams"),
+])
+async def test_a_site_audited_in_an_older_run_is_still_found(
+        ctx, monkeypatch, tmp_path, tool_name, params_name):
+    """Спросить про сайт, проверенный НЕ в последнем прогоне, — не ошибка.
+
+    НАЙДЕНО НА ЖИВОМ ПОРТФЕЛЕ. Отчёт по climtec.md отвечал «Сайта climtec.md в
+    этом прогоне нет», хотя сайт проверен и лежит в базе: обработчики брали
+    последний прогон ВООБЩЕ, а последним был аудит другого сайта. Для человека
+    это неотличимо от потери данных — он открывает страницу сайта, видит
+    находки, нажимает «Отчёт» и получает «такого сайта нет».
+
+    Дефект был системным: одинаково в четырёх обработчиках. Поэтому починка
+    живёт в `resolve_run(site=...)` — одно место, а не четыре копии; тест
+    параметризован по всем четырём, чтобы копия не отросла заново.
+    """
+    import handlers_read as hr
+    import models
+
+    path = _two_runs_db(tmp_path)
+
+    async def fake_download(_ctx):
+        return path
+
+    monkeypatch.setattr(hr.br, "download_db", fake_download)
+
+    tool = getattr(hr, tool_name)
+    params = getattr(models, params_name)(site="climtec.md")
+    result = await tool(ctx, params)
+
+    assert result.status == "success", (
+        f"{tool_name}: сайт из старого прогона не найден — {result.error}")
+
+
+async def test_an_explicit_run_is_never_silently_replaced(ctx, monkeypatch, tmp_path):
+    """Явно названный прогон подменять нельзя.
+
+    Обратная сторона починки: если человек спросил «прогон #2», он спрашивает
+    про КОНКРЕТНУЮ проверку. Молча увести его в другой прогон, потому что там
+    сайт «тоже есть», значило бы ответить не на заданный вопрос — и человек
+    сравнивал бы данные, думая, что смотрит на прогон #2.
+    """
+    import handlers_read as hr
+    from models import GetReportParams
+
+    path = _two_runs_db(tmp_path)
+
+    async def fake_download(_ctx):
+        return path
+
+    monkeypatch.setattr(hr.br, "download_db", fake_download)
+
+    # прогон #2 — новый, там climtec.md НЕТ. Ответ обязан быть честным отказом.
+    result = await hr.get_report(ctx, GetReportParams(site="climtec.md", run_id=2))
+
+    assert result.status == "error"
+    assert result.error_code == c.SEO_SITE_NOT_FOUND

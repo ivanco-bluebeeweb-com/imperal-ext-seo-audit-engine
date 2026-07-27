@@ -179,11 +179,26 @@ def resume_blocking(db_path: str, run_id: int, *, on_event=None) -> int:
         store.close()
 
 
-def resolve_run(store: Store, run_id: int = 0) -> int:
-    """Номер прогона: явный или последний. 0 — прогонов нет вовсе."""
+def resolve_run(store: Store, run_id: int = 0, *, site: str = "") -> int:
+    """Номер прогона: явный, «где был этот сайт», или последний. 0 — прогонов нет.
+
+    `site` меняет смысл «последнего»: не последний прогон ВООБЩЕ, а последний,
+    в котором проверялся именно этот домен. Портфель аудят частями — сегодня
+    один сайт, завтра другой. Без этого спросить отчёт по climtec.md сразу
+    после аудита другого сайта значило получить «такого сайта нет», хотя он
+    проверен и лежит в базе. Для человека это неотличимо от потери данных.
+    Найдено на живом портфеле.
+
+    Явный `run_id` всегда сильнее: если человек назвал прогон, подменять его
+    нельзя — он спрашивает про конкретную проверку.
+    """
     if run_id:
         row = store.get_run(run_id)
         return int(row["id"]) if row else 0
+    if site:
+        for_host = latest_run_for_host(store, site)
+        if for_host:
+            return for_host
     row = store.latest_run()
     return int(row["id"]) if row else 0
 
@@ -641,3 +656,31 @@ def findings_by_layer(findings: list[dict[str, Any]]) -> list[tuple[int, str, li
                        key=lambda x: severity_rank(x.get("severity", "")))
         out.append((layer, layer_name(layer), items))
     return out
+
+
+def latest_run_for_host(store: Store, host: str) -> int | None:
+    """Последний прогон, в котором ЭТОТ домен действительно проверялся.
+
+    Нужно, потому что `resolve_run` даёт последний прогон ВООБЩЕ. Портфель
+    проверяют частями: сегодня один сайт, завтра другой. Спросить отчёт по
+    climtec.md сразу после аудита другого сайта — и получить «такого сайта
+    нет», хотя он проверен и лежит в базе. Для человека это выглядит как
+    потеря данных, а не как «вы смотрите не тот прогон».
+
+    Домен нормализуется так же, как в списке и в `site_detail`.
+    """
+    needle = host_label(host)
+    if not needle:
+        return None
+    row = store.db.execute(
+        f"""
+        SELECT s.run_id AS run_id
+        FROM sites s
+        JOIN runs r ON r.id = s.run_id
+        WHERE {_SQL_HOST} = ?
+        ORDER BY r.started_at DESC, s.id DESC
+        LIMIT 1
+        """,
+        [needle],
+    ).fetchone()
+    return int(row["run_id"]) if row else None
