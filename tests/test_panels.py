@@ -483,3 +483,51 @@ async def test_schedule_screen_form_fields_match_the_tool_parameters(ctx):
     unknown = names - allowed
     assert not unknown, f"поля формы, которых нет у set_schedule: {unknown}"
     assert "enabled" in names, "без переключателя расписание не включить"
+
+
+#: Аргументы, которые принимает ПАНЕЛЬ, а не только SDK.
+#:
+#: Список узнан не из документации, а из отказа деплоя: `ui.Input(type=...)`
+#: проходил и локальный тест сигнатур, и `imperal validate`, потому что в
+#: сигнатуре SDK параметр `type` есть — а платформенный контракт компонента
+#: его не принимает и отклоняет сборку целиком.
+#:
+#: Здесь перечислены только те компоненты, чей узкий список подтверждён
+#: ответом платформы. Догадки сюда добавлять нельзя: выдуманное ограничение
+#: запретит рабочий код и будет выглядеть как правило.
+PANEL_ALLOWED_KWARGS = {
+    "Input": {"on_submit", "param_name", "placeholder", "value"},
+}
+
+
+def test_ui_calls_respect_the_panel_contract_not_just_the_sdk_signature():
+    """Панель строже SDK — и расходится с ним молча, до самого деплоя.
+
+    Тест выше сверяет вызовы с сигнатурой `imperal_sdk.ui`. Этого оказалось
+    мало: сборку отклонил аргумент, который в сигнатуре ЕСТЬ, а панель его не
+    принимает. Разницу видно только по ответу платформы, поэтому она записана
+    здесь явно.
+    """
+    import ast
+    import pathlib
+
+    problems: list[str] = []
+    source = pathlib.Path(__file__).resolve().parent.parent / "panels.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "ui"):
+            continue
+        allowed = PANEL_ALLOWED_KWARGS.get(node.func.attr)
+        if allowed is None:
+            continue
+        for kw in node.keywords:
+            if kw.arg and kw.arg not in allowed:
+                problems.append(
+                    f"строка {node.lineno}: ui.{node.func.attr}(...{kw.arg}=...) "
+                    f"— панель такой аргумент не принимает; "
+                    f"допустимы: {', '.join(sorted(allowed))}")
+
+    assert not problems, "вызовы ui.* нарушают контракт панели:\n  " + "\n  ".join(problems)

@@ -933,8 +933,12 @@ def _schedule_view(d: dict[str, Any]) -> Any:
                          value=str(d.get("sites") or ""),
                          placeholder="climtec.md, example.com"),
                 ui.Text(content="Страниц на сайт", variant="caption"),
-                ui.Input(param_name="max_pages", type="number",
-                         value=str(int(d.get("max_pages", 50)))),
+                # Без type="number": сигнатура SDK его принимает, а панельный
+                # контракт — нет, и деплой отклоняется. Ограничение 1..500
+                # всё равно живёт в модели параметров, а не в поле ввода.
+                ui.Input(param_name="max_pages",
+                         value=str(int(d.get("max_pages", 50))),
+                         placeholder="например 50"),
             ],
         ),
         ui.Button(label="К портфелю", on_click=ui.Call("__panel__seo")),
