@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import unittest
+from urllib.parse import urlsplit
 
 import bridge as br
 from seoaudit.discover import normalize_url, with_scheme
@@ -30,13 +31,19 @@ class WithScheme(unittest.TestCase):
             self.assertEqual(with_scheme(url), url)
 
     def test_the_actual_regression_no_host_given(self):
-        """Ровно та поломка, ради которой всё это написано."""
-        broken = normalize_url("climtec.md")
-        self.assertNotIn("://", broken, "тест устарел: normalize_url изменился")
+        """Ровно та поломка, ради которой всё это написано.
 
+        Утверждение здесь ОДНО: пройдя границу ввода, голый домен становится
+        адресом с настоящим хостом. Раньше тест дополнительно фиксировал, что
+        БЕЗ `with_scheme` получается битый `https:climtec.md` — и это оказалось
+        привязкой к самой поломке: разбор адресов зависит от версии Python, и
+        на другой среде проверка развалилась, хотя приложение исправно. Тест
+        обязан держать требование, а не форму бага.
+        """
         fixed = normalize_url(with_scheme("climtec.md"))
         self.assertTrue(fixed.startswith("https://"), fixed)
-        self.assertIn("climtec.md", fixed)
+        # Хост действительно распознан, а не приклеен к пути.
+        self.assertEqual(urlsplit(fixed).hostname, "climtec.md")
 
     def test_empty_input_stays_empty(self):
         """Пустая строка не должна превращаться в 'https://'."""
