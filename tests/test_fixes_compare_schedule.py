@@ -21,7 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from seoaudit.compare import COVERAGE_TOLERANCE, compare_findings, summarise
-from seoaudit.fixes import build_fixes, summarise_fixes
+from seoaudit.fixes import (_desc_fix, _trim_to, build_fixes,
+                            summarise_fixes)
 
 
 def page(url, **over):
@@ -322,3 +323,47 @@ class Schedule(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrimQuality(unittest.TestCase):
+    """Как именно режется длинный текст — это видно человеку в выдаче.
+
+    Обрезка «формально в рамке» и обрезка «читается как текст» — разные вещи,
+    и разница не ловится ни одной проверкой длины. Живой пример, с которого
+    начались эти тесты: описание резалось как «…Analiza parametrilor și a
+    liniei» — фраза обрывается на предлоге, длина при этом идеальная.
+    """
+
+    def test_description_is_cut_at_the_end_of_a_sentence(self):
+        long_desc = (
+            "Cum alegi recuperatorul pentru apartament: debitul de aer după "
+            "suprafață, numărul de persoane, nivelul de zgomot și montajul. "
+            "Analiza parametrilor și a liniei Quattro.")
+        out, conf, _note = _desc_fix({"description": long_desc})
+        self.assertEqual(conf, "high")
+        self.assertTrue(out.endswith("."), f"обрывок вместо фразы: {out!r}")
+        self.assertNotIn("și a liniei", out)
+
+    def test_an_early_full_stop_does_not_collapse_the_text(self):
+        """«Коротко.» в начале не должно съесть всё описание.
+
+        Обрезка по первому же предложению формально красива и по сути хуже
+        исходного: в выдачу уйдёт огрызок из одного слова. Нижняя граница
+        существует ровно против этого.
+        """
+        text = ("Коротко. Дальше идёт основной длинный текст описания "
+                "страницы, который несёт весь смысл для человека в поисковой "
+                "выдаче и обязан сохраниться целиком без потерь и обрывов.")
+        out, _conf, _note = _desc_fix({"description": text})
+        self.assertGreater(len(out), 100, f"описание схлопнулось: {out!r}")
+
+    def test_text_without_any_full_stop_still_gets_trimmed(self):
+        """Нет точек — режем по словам, но никогда посреди слова."""
+        text = ("Одно длинное предложение без единой точки в котором смысл "
+                "тянется до самого конца и обрывать его придётся по словам "
+                "потому что резать больше решительно негде совершенно")
+        out = _trim_to(text, 160, keep_at_least=120)
+        self.assertLessEqual(len(out), 160)
+        self.assertFalse(out.endswith(" "))
+        # Последнее слово должно быть целым словом исходника.
+        self.assertIn(out.split()[-1], text.split())

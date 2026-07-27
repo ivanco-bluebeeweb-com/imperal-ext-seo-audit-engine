@@ -117,12 +117,35 @@ def _brand_of(origin: str) -> str:
     return base.capitalize() if base else ""
 
 
-def _trim_to(text: str, limit: int) -> str:
-    """Обрезка ПО СЛОВАМ — обрубленное слово выглядит как поломка."""
+def _trim_to(text: str, limit: int, *, keep_at_least: int = 0) -> str:
+    """Обрезка ПО СЛОВАМ — обрубленное слово выглядит как поломка.
+
+    `keep_at_least` включает обрезку ПО ПРЕДЛОЖЕНИЮ: если точка попадает в
+    рамку и после неё остаётся не меньше указанного, режем по ней.
+
+    Зачем это нужно, видно на живом описании: обрезка по словам оставила
+    «…Analiza parametrilor și a liniei» — фраза обрывается на предлоге, и в
+    выдаче это читается как сломанная страница, хотя формально длина в норме.
+    Законченное предложение короче, но выглядит как текст, а не как обрубок.
+
+    Нижняя граница обязательна: без неё описание из одного короткого первого
+    предложения схлопнулось бы до пары слов — формально «красиво», по сути
+    хуже исходного.
+    """
     text = _clean(text)
     if len(text) <= limit:
         return text
+
     cut = text[:limit]
+
+    if keep_at_least:
+        # Ищем последний конец предложения внутри рамки.
+        end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+        if end == -1 and cut.rstrip().endswith((".", "!", "?")):
+            end = len(cut.rstrip()) - 1
+        if end >= keep_at_least:
+            return cut[:end + 1].strip()
+
     if " " in cut:
         cut = cut[:cut.rfind(" ")]
     return cut.rstrip(" ,.;:—-")
@@ -167,7 +190,10 @@ def _desc_fix(page: dict[str, Any]) -> tuple[str, str, str]:
     """Готовит описание. Обрезать длинное — можно, сочинять текст — нет."""
     current = _clean(page.get("description") or "")
     if current and len(current) > DESC_MAX:
-        return _trim_to(current, DESC_MAX), "high", "сокращено до рамки выдачи"
+        # keep_at_least=DESC_MIN: режем по концу предложения, но только если
+        # после этого описание остаётся полноценным. Иначе — по словам.
+        return (_trim_to(current, DESC_MAX, keep_at_least=DESC_MIN),
+                "high", "сокращено до рамки выдачи")
     # Пустое описание автоматически НЕ пишем: это единственное место в
     # выдаче, где сайт говорит своими словами. Сгенерированный из текста
     # обрывок выглядит как машинный мусор и снижает кликабельность.
