@@ -14,6 +14,9 @@
     ui.Call("__panel__seo")                  -> портфель (по умолчанию)
     ui.Call("__panel__seo", view="findings")  -> находки
     ui.Call("__panel__seo", view="tasks")     -> задачи
+    ui.Call("__panel__seo", view="site", site=<host>)              -> карточка сайта
+    ui.Call("__panel__seo", view="pages", site=<host>)             -> страницы сайта
+    ui.Call("__panel__seo", view="page", site=<host>, page=<url>)  -> карточка страницы
 
 Так вызов всегда попадает в панель, которая реально смонтирована. Структурный
 тест падает, если кто-то снова заведёт вторую панель на том же слоте.
@@ -74,10 +77,122 @@ async def _load_site(ctx, host: str) -> dict[str, Any]:
             # Не ошибка: сайт мог быть удалён из портфеля или домен набран
             # руками с опечаткой. Человеку нужен путь назад, а не «сбой».
             return {"missing": br.host_label(host) or host}
+        # Превью «Страницы» на карточке сайта — несколько строк, не весь
+        # список: полный список и постраничность — дело экрана `view=pages`.
+        all_pages = br.site_pages(store, detail["site_id"], detail["findings"])
+        all_pages.sort(key=lambda p: (
+            br.severity_rank(p["worst_severity"]) if p["worst_severity"] else 99,
+            -p["findings_count"],
+        ))
+        detail["pages_total"] = len(all_pages)
+        detail["pages_preview"] = all_pages[:5]
         return {"detail": detail}
     except Exception as exc:
         await ctx.log(f"panel: site detail failed: {type(exc).__name__}", "error")
         return {"problem": "Не удалось собрать данные сайта. Попробуйте обновить."}
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+
+
+async def _load_pages(ctx, host: str, *, only_issues: bool = False) -> dict[str, Any]:
+    """Прочитать список страниц одного сайта, с находками на каждую.
+
+    Точечно по домену, как `_load_site`: находки сайта поднимаются один раз,
+    а разложить их по страницам — дело `br.site_pages` (та же `same_url`,
+    что судит и `list_findings(page_url=...)` в чате).
+    """
+    try:
+        path = await br.download_db(ctx)
+    except Exception as exc:
+        await ctx.log(f"panel: storage read failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось получить данные сайта. Попробуйте обновить."}
+
+    if not path:
+        return {"first_run": True}
+
+    try:
+        store = br.open_store(path)
+    except Exception as exc:
+        await ctx.log(f"panel: db unreadable: {type(exc).__name__}", "error")
+        return {"problem": "Данные аудита не читаются. Запустите аудит заново."}
+
+    try:
+        detail = br.site_detail(store, host)
+        if detail is None:
+            return {"missing": br.host_label(host) or host}
+        pages = br.site_pages(store, detail["site_id"], detail["findings"],
+                              only_issues=only_issues)
+        return {
+            "host": detail["host"], "origin": detail["origin"],
+            "pages": pages, "total": len(pages),
+            "only_issues": only_issues,
+        }
+    except Exception as exc:
+        await ctx.log(f"panel: pages load failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось собрать список страниц. Попробуйте обновить."}
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+
+
+async def _load_page(ctx, host: str, page_url: str) -> dict[str, Any]:
+    """Прочитать одну страницу сайта: находки, задачи, canonical.
+
+    Переиспользует РОВНО те функции движка, что уже стоят за
+    `list_findings(page_url=...)`/`get_report(page_url=...)` в чате
+    (`find_page`, `filter_findings_by_page`, `filter_tasks_by_page`,
+    `known_page_urls`) — экран и чат обязаны отвечать на один вопрос одинаково.
+    """
+    try:
+        path = await br.download_db(ctx)
+    except Exception as exc:
+        await ctx.log(f"panel: storage read failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось получить данные страницы. Попробуйте обновить."}
+
+    if not path:
+        return {"first_run": True}
+
+    try:
+        store = br.open_store(path)
+    except Exception as exc:
+        await ctx.log(f"panel: db unreadable: {type(exc).__name__}", "error")
+        return {"problem": "Данные аудита не читаются. Запустите аудит заново."}
+
+    try:
+        detail = br.site_detail(store, host)
+        if detail is None:
+            return {"missing": br.host_label(host) or host}
+
+        page = br.find_page(store, detail["site_id"], page_url)
+        if page is None:
+            known = br.known_page_urls(store, detail["site_id"])
+            return {"page_missing": page_url, "host": detail["host"],
+                    "known": known}
+
+        findings = br.filter_findings_by_page(detail["findings"], page_url)
+        task_pairs = br.filter_tasks_by_page(detail["tasks"], page_url)
+
+        # `find_page` уже разобрал `head` внутри себя и вернул готовые поля —
+        # разбирать JSON второй раз здесь незачем и рискует разойтись с тем,
+        # что видит `get_report(page_url=...)` в чате.
+        return {
+            "host": detail["host"], "origin": detail["origin"],
+            "url": page.get("url") or page_url,
+            "title": page.get("title") or "",
+            "canonical": page.get("canonical") or "",
+            "status": page.get("status"),
+            "fetched_at": page.get("fetched_at"),
+            "findings": findings,
+            "task_pairs": task_pairs,
+        }
+    except Exception as exc:
+        await ctx.log(f"panel: page load failed: {type(exc).__name__}", "error")
+        return {"problem": "Не удалось собрать данные страницы. Попробуйте обновить."}
     finally:
         try:
             store.close()
@@ -524,6 +639,30 @@ def _site_view(data: dict[str, Any]) -> Any:
             children=[ui.Accordion(sections=layer_blocks)],
         ))
 
+    # --- страницы (превью, полный список — отдельный экран) -------------------
+    pages_preview = data.get("pages_preview") or []
+    pages_total = int(data.get("pages_total") or 0)
+    if pages_preview:
+        preview_items = []
+        for p in pages_preview:
+            label, colour = SEVERITY_LABEL.get(
+                p["worst_severity"], ("чисто", "green")) if p["worst_severity"] else (
+                "чисто", "green")
+            bits = [f"{p['findings_count']} находок"] if p["findings_count"] else ["без находок"]
+            preview_items.append(ui.ListItem(
+                id=f"page-{p['url']}",
+                title=_short_url(p["url"]),
+                subtitle=p.get("title") or "",
+                meta=" · ".join(bits),
+                badge=ui.Badge(label=label, color=colour),
+                on_click=ui.Call("__panel__seo", view="page",
+                                  site=host, page=p["url"]),
+            ))
+        children.append(ui.Section(
+            title=f"Страницы ({pages_total})",
+            children=[ui.List(items=preview_items)],
+        ))
+
     # --- стало лучше или хуже -------------------------------------------------
     history = data.get("history") or []
     if len(history) > 1:
@@ -543,10 +682,181 @@ def _site_view(data: dict[str, Any]) -> Any:
     children.append(ui.Row(gap=2, children=[
         ui.Button(label="← Все сайты",
                   on_click=ui.Call("__panel__seo", view="sites")),
+        ui.Button(label="Все страницы", variant="secondary",
+                  on_click=ui.Call("__panel__seo", view="pages", site=host)),
+        ui.Button(label="Сравнить прогоны", variant="secondary",
+                  on_click=ui.Call("__panel__seo", view="compare", site=host)),
         ui.Button(label="Перепроверить", variant="secondary",
                   on_click=ui.Call("audit_sites", sites=host)),
         ui.Button(label="Отчёт", variant="ghost",
                   on_click=ui.Call("get_report", site=host)),
+    ]))
+
+    return ui.Stack(direction="v", gap=3, children=children)
+
+
+def _pages_view(data: dict[str, Any]) -> Any:
+    """Все страницы одного сайта — с переключателем «только с находками».
+
+    SKETCH -- view="pages"
+      ui.Stack (v, gap=3)
+        ui.Header(<домен>, subtitle="N страниц · M с находками")
+        ui.Row -> Button("Все страницы") / Button("Только с находками")
+        ui.List(items=[ui.ListItem * страница])
+        ui.Row -> Назад к сайту / Все сайты
+
+    Список, а не DataTable: страниц одного сайта — десятки, не сотни (в
+    отличие от портфеля), и здесь важен клик по строке в карточку страницы —
+    ровно то, что `List` умеет, а плотная таблица усложняет.
+    """
+    host = data["host"]
+    pages = data.get("pages") or []
+    total = int(data.get("total") or 0)
+    only_issues = bool(data.get("only_issues"))
+    with_issues = sum(1 for p in pages if p["findings_count"]) if not only_issues \
+        else total
+
+    items: list[Any] = []
+    for p in pages:
+        worst = p.get("worst_severity") or ""
+        if worst:
+            label, colour = SEVERITY_LABEL.get(worst, (worst, "gray"))
+        else:
+            label, colour = "чисто", "green"
+        bits = [f"{p['findings_count']} находок"] if p["findings_count"] else ["без находок"]
+        if p.get("status"):
+            bits.append(f"код {p['status']}")
+        items.append(ui.ListItem(
+            id=p["url"],
+            title=_short_url(p["url"]),
+            subtitle=p.get("title") or "",
+            meta=" · ".join(bits),
+            badge=ui.Badge(label=label, color=colour),
+            on_click=ui.Call("__panel__seo", view="page", site=host, page=p["url"]),
+            actions=[
+                {"icon": "ArrowRight", "label": "Открыть",
+                 "on_click": ui.Call("__panel__seo", view="page", site=host,
+                                      page=p["url"])},
+            ],
+        ))
+
+    subtitle = f"{total} страниц"
+    if not only_issues:
+        subtitle += f" · с находками: {with_issues}"
+
+    children: list[Any] = [
+        ui.Header(f"Страницы {host}", subtitle=subtitle),
+        ui.Row(gap=2, children=[
+            ui.Button(label="Все страницы",
+                      variant="primary" if not only_issues else "ghost",
+                      on_click=ui.Call("__panel__seo", view="pages", site=host,
+                                       only_issues="")),
+            ui.Button(label="Только с находками",
+                      variant="primary" if only_issues else "ghost",
+                      on_click=ui.Call("__panel__seo", view="pages", site=host,
+                                       only_issues="1")),
+        ]),
+    ]
+
+    if items:
+        children.append(ui.List(items=items))
+    else:
+        children.append(ui.Empty(
+            message="Страниц с находками нет — весь сайт чист." if only_issues
+            else "У этого сайта пока нет проверенных страниц."))
+
+    children.append(ui.Row(gap=2, children=[
+        ui.Button(label="← К сайту",
+                  on_click=ui.Call("__panel__seo", view="site", site=host)),
+        ui.Button(label="Все сайты", variant="ghost",
+                  on_click=ui.Call("__panel__seo", view="sites")),
+    ]))
+
+    return ui.Stack(direction="v", gap=3, children=children)
+
+
+def _page_view(data: dict[str, Any]) -> Any:
+    """Карточка ОДНОЙ страницы — построена на opt-in page_url слое движка.
+
+    SKETCH -- view="page"
+      ui.Stack (v, gap=3)
+        ui.Header(<url>, subtitle=<title> · <когда проверена>)
+        ui.Stats -> Stat * 4              # статус, canonical, находки, задачи
+        ui.Alert                          # canonical не совпадает со страницей
+        ui.Section("Находки этой страницы") -> ui.List
+        ui.Section("Задачи, которые её касаются") -> ui.List
+        ui.Row -> Назад к страницам / К сайту / Отчёт по странице
+    """
+    host = data["host"]
+    url = data["url"]
+    findings = data.get("findings") or []
+    task_pairs = data.get("task_pairs") or []
+    canonical = data.get("canonical") or ""
+
+    children: list[Any] = [
+        ui.Header(url, subtitle=(data.get("title") or "без заголовка") +
+                  (f" · код {data['status']}" if data.get("status") else "")),
+        ui.Stats(children=[
+            ui.Stat(label="Canonical", value=canonical or "не указан"),
+            ui.Stat(label="Находок", value=str(len(findings))),
+            ui.Stat(label="Задач", value=str(len(task_pairs))),
+        ]),
+    ]
+
+    # Canonical, указывающий на ДРУГОЙ адрес — важный самостоятельный сигнал,
+    # который иначе тонет в общем списке находок ниже.
+    if canonical and not br.same_url(canonical, url):
+        children.append(ui.Alert(
+            f"Canonical этой страницы указывает на другой адрес: {canonical}",
+            type="warning"))
+
+    if findings:
+        f_items = []
+        for f in sorted(findings, key=lambda x: br.severity_rank(x.get("severity"))):
+            label, colour = SEVERITY_LABEL.get(
+                f.get("severity"), (f.get("severity") or "—", "gray"))
+            via = f.get("matched_via")
+            via_note = "своя находка" if via == "url" else \
+                "часть находки уровня сайта" if via else ""
+            f_items.append(ui.ListItem(
+                id=f"finding-{f.get('rule')}-{f.get('id', '')}",
+                title=f.get("message") or f.get("rule") or "—",
+                subtitle=" · ".join(x for x in (br.layer_name(f.get("layer", 0)),
+                                                via_note) if x),
+                badge=ui.Badge(label=label, color=colour),
+            ))
+        children.append(ui.Section(
+            title="Находки этой страницы",
+            children=[ui.List(items=f_items)],
+        ))
+    else:
+        children.append(ui.Alert("По этой странице находок нет.", type="success"))
+
+    if task_pairs:
+        t_items = []
+        for t, matched_url in task_pairs:
+            label, colour = SEVERITY_LABEL.get(
+                t.severity, (t.severity or "—", "gray"))
+            t_items.append(ui.ListItem(
+                id=f"task-{t.rule}",
+                title=t.title,
+                subtitle=label,
+                badge=ui.Badge(label=label, color=colour),
+                expandable=bool(t.body),
+                expanded_content=[ui.Text(content=t.body)] if t.body else [],
+            ))
+        children.append(ui.Section(
+            title="Задачи, которые её касаются",
+            children=[ui.List(items=t_items)],
+        ))
+
+    children.append(ui.Row(gap=2, children=[
+        ui.Button(label="← Страницы сайта",
+                  on_click=ui.Call("__panel__seo", view="pages", site=host)),
+        ui.Button(label="К сайту", variant="secondary",
+                  on_click=ui.Call("__panel__seo", view="site", site=host)),
+        ui.Button(label="Отчёт по странице", variant="ghost",
+                  on_click=ui.Call("get_report", site=host, page_url=url)),
     ]))
 
     return ui.Stack(direction="v", gap=3, children=children)
@@ -997,6 +1307,53 @@ async def seo_center(ctx, **kwargs):
                 f"возможно, он ещё не проверялся.",
                 kind="info", back_to_sites=True)
         return _site_view(site_data["detail"])
+
+    if view == "pages":
+        host = str(kwargs.get("site") or kwargs.get("host") or "").strip()
+        if not host:
+            return _banner("Не указан сайт. Откройте список и выберите сайт.")
+        only_issues = str(kwargs.get("only_issues") or "").strip() not in ("", "0")
+        pages_data = await _load_pages(ctx, host, only_issues=only_issues)
+        if pages_data.get("problem"):
+            return _banner(pages_data["problem"])
+        if pages_data.get("first_run"):
+            return _first_run()
+        if pages_data.get("missing"):
+            return _banner(
+                f"Сайт «{pages_data['missing']}» в результатах аудита не найден — "
+                f"возможно, он ещё не проверялся.",
+                kind="info", back_to_sites=True)
+        return _pages_view(pages_data)
+
+    if view == "page":
+        host = str(kwargs.get("site") or kwargs.get("host") or "").strip()
+        page_url = str(kwargs.get("page") or kwargs.get("page_url") or "").strip()
+        if not host or not page_url:
+            return _banner(
+                "Не указана страница: нужны и сайт, и точный адрес.",
+                kind="info", back_to_sites=True)
+        page_data = await _load_page(ctx, host, page_url)
+        if page_data.get("problem"):
+            return _banner(page_data["problem"])
+        if page_data.get("first_run"):
+            return _first_run()
+        if page_data.get("missing"):
+            return _banner(
+                f"Сайт «{page_data['missing']}» в результатах аудита не найден — "
+                f"возможно, он ещё не проверялся.",
+                kind="info", back_to_sites=True)
+        if page_data.get("page_missing"):
+            # СТРОГИЙ КОНТРАКТ: точный адрес не найден — честная ошибка со
+            # списком известных адресов, а не тихая подмена на «похожую»
+            # страницу (тот же принцип, что в `bridge.find_page`).
+            known = ", ".join(page_data.get("known") or [])
+            return _banner(
+                f"Страницы «{page_data['page_missing']}» нет среди проверенных "
+                f"на {page_data.get('host') or host}. "
+                + (f"Известные адреса: {known}." if known
+                   else "Известных адресов пока нет."),
+                kind="info")
+        return _page_view(page_data)
 
     if view == "fixes":
         # Правки читаются СВОИМ путём: экрану не нужны ни задачи, ни сводка

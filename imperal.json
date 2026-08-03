@@ -713,6 +713,12 @@
             "title": "Site",
             "type": "string"
           },
+          "page_url": {
+            "default": "",
+            "description": "Точный адрес ОДНОЙ страницы, например 'https://g4s.md/' для Home. Опционально: пусто — поведение как раньше (по всему сайту/портфелю). Сравнение — по нормализованному URL (без учёта регистра схемы/хоста, конечного слэша); главная страница сайта и адрес БЕЗ слэша считаются тем же адресом. Если такой страницы в прогоне нет, инструмент вернёт явную ошибку, а не ближайший похожий URL.",
+            "title": "Page Url",
+            "type": "string"
+          },
           "min_severity": {
             "default": "medium",
             "description": "Порог важности: critical, high, medium, low, info. Возвращаются находки этого уровня и выше.",
@@ -874,6 +880,12 @@
             "title": "Site",
             "type": "string"
           },
+          "page_url": {
+            "default": "",
+            "description": "Точный адрес ОДНОЙ страницы, например 'https://g4s.md/' для Home. Опционально: пусто — поведение как раньше (по всему сайту/портфелю). Сравнение — по нормализованному URL (без учёта регистра схемы/хоста, конечного слэша); главная страница сайта и адрес БЕЗ слэша считаются тем же адресом. Если такой страницы в прогоне нет, инструмент вернёт явную ошибку, а не ближайший похожий URL.",
+            "title": "Page Url",
+            "type": "string"
+          },
           "min_severity": {
             "default": "medium",
             "description": "Порог важности: critical, high, medium, low, info. Возвращаются находки этого уровня и выше.",
@@ -990,6 +1002,11 @@
             "default": "",
             "title": "Detail",
             "type": "string"
+          },
+          "matched_via": {
+            "default": "",
+            "title": "Matched Via",
+            "type": "string"
           }
         },
         "required": [
@@ -1026,6 +1043,12 @@
             "default": "",
             "description": "Домен. Пусто — задачи по всему портфелю.",
             "title": "Site",
+            "type": "string"
+          },
+          "page_url": {
+            "default": "",
+            "description": "Точный адрес ОДНОЙ страницы, например 'https://g4s.md/' для Home. Опционально: пусто — поведение как раньше (по всему сайту/портфелю). Сравнение — по нормализованному URL (без учёта регистра схемы/хоста, конечного слэша); главная страница сайта и адрес БЕЗ слэша считаются тем же адресом. Если такой страницы в прогоне нет, инструмент вернёт явную ошибку, а не ближайший похожий URL.",
+            "title": "Page Url",
             "type": "string"
           },
           "min_severity": {
@@ -1182,6 +1205,11 @@
             "default": "",
             "title": "Fingerprint",
             "type": "string"
+          },
+          "matched_page": {
+            "default": "",
+            "title": "Matched Page",
+            "type": "string"
           }
         },
         "required": [
@@ -1220,6 +1248,12 @@
             "title": "Site",
             "type": "string"
           },
+          "page_url": {
+            "default": "",
+            "description": "Точный адрес ОДНОЙ страницы, например 'https://g4s.md/' для Home. Опционально: пусто — поведение как раньше (по всему сайту/портфелю). Сравнение — по нормализованному URL (без учёта регистра схемы/хоста, конечного слэша); главная страница сайта и адрес БЕЗ слэша считаются тем же адресом. Если такой страницы в прогоне нет, инструмент вернёт явную ошибку, а не ближайший похожий URL. Если задан, отчёт строится ТОЛЬКО по этой странице (site можно не указывать — определится по хосту page_url).",
+            "title": "Page Url",
+            "type": "string"
+          },
           "min_severity": {
             "default": "medium",
             "description": "Порог важности для задач в отчёте.",
@@ -1231,7 +1265,7 @@
         "type": "object"
       },
       "return_schema": {
-        "description": "Готовый отчёт в Markdown — по сайту или по портфелю.",
+        "description": "Готовый отчёт в Markdown — по сайту, по портфелю или по одной странице.",
         "properties": {
           "id": {
             "anyOf": [
@@ -1320,6 +1354,21 @@
             "default": 0,
             "title": "Tasks Total",
             "type": "integer"
+          },
+          "page_url": {
+            "default": "",
+            "title": "Page Url",
+            "type": "string"
+          },
+          "findings_total": {
+            "default": 0,
+            "title": "Findings Total",
+            "type": "integer"
+          },
+          "has_critical_or_high": {
+            "default": false,
+            "title": "Has Critical Or High",
+            "type": "boolean"
           }
         },
         "required": [
@@ -1356,6 +1405,12 @@
             "default": "",
             "description": "Домен. Пусто — весь портфель.",
             "title": "Site",
+            "type": "string"
+          },
+          "page_url": {
+            "default": "",
+            "description": "Зарезервировано под будущую фильтрацию по странице. Пока не влияет на план.",
+            "title": "Page Url",
             "type": "string"
           },
           "project": {

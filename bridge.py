@@ -32,6 +32,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 # Движок лежит рядом как обычный пакет — расширение его ИМПОРТИРУЕТ, а не
 # копирует логику: правило аудита правится в одном месте.
@@ -40,8 +41,17 @@ from typing import Any
 # и именно так баг с «https:climtec.md» уцелел в CLI, пока платформа была цела.
 from seoaudit.discover import with_scheme  # noqa: F401  (реэкспорт для инструментов)
 from seoaudit.engine import AuditConfig, Engine
+from seoaudit.extract import same_url  # ОДНА функция нормализации URL на всё
+# приложение — та же, что движок использует для canonical. Изобретать вторую
+# копию правил нормализации (регистр схемы/хоста, конечный слэш) означало бы
+# рисковать тем, что «страница = страница» в отчёте и в page-фильтре разойдутся.
 from seoaudit.fetcher import FetchPolicy
-from seoaudit.reports import host_of, portfolio_report_md, site_report_md
+from seoaudit.reports import (
+    host_of,
+    page_report_md,
+    portfolio_report_md,
+    site_report_md,
+)
 from seoaudit.severity import CRITICAL, HIGH, LAYER_NAMES, SEVERITY_ORDER
 from seoaudit.store import Store
 from seoaudit.tasks import build_tasks
@@ -249,6 +259,205 @@ def match_site(rows: list[dict[str, Any]], wanted: str) -> dict[str, Any] | None
         if host == needle or needle in host:
             return row
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PAGE-LEVEL SLICE — opt-in фильтр по точному адресу одной страницы.
+#
+# Строгий контракт (сознательное решение, не забывчивость): сравнение ТОЛЬКО
+# через `same_url` движка (та же функция, что судит canonical) — без fuzzy-
+# подмены на «похожий» URL. Не найдено — явная ошибка с примерами известных
+# адресов, а не тихий выбор ближайшего.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _evidence_urls(finding: dict[str, Any]) -> list[str]:
+    """Все URL, упомянутые внутри evidence находки уровня сайта.
+
+    Правила уровня сайта (сироты, битые внутренние ссылки, тупики, глубокие
+    страницы, кластеры canonical, дубли title/description) кладут ПОЛНЫЙ
+    список затронутых страниц в evidence — под разными ключами, потому что
+    правила писались в разное время. Список ключей закрыт тем, что реально
+    есть в `seoaudit/rules.py` — если правило заведёт новый ключ со списком
+    страниц, эта функция придётся дополнить (закрывающий список — осознанное
+    решение, а не забытая ветка).
+    """
+    ev = finding.get("evidence")
+    if isinstance(ev, str):
+        try:
+            ev = json.loads(ev)
+        except (ValueError, TypeError):
+            ev = {}
+    if not isinstance(ev, dict):
+        return []
+
+    out: list[str] = []
+
+    def _add(u):
+        u = (str(u) or "").strip()
+        if u and u not in out:
+            out.append(u)
+
+    for key in ("urls", "orphans", "targets", "dead"):
+        for u in ev.get(key) or []:
+            _add(u)
+    # {"pages": [{"url": ..., "depth": ...}]} — structure.deep_page.
+    # ВНИМАНИЕ: у structure.orphan_suspect тот же ключ "pages" хранит просто
+    # ЧИСЛО (сколько всего страниц проверено), а не список — оба правила
+    # писались независимо. isinstance-проверка ниже отличает одно от другого.
+    pages_ev = ev.get("pages")
+    if isinstance(pages_ev, list):
+        for p in pages_ev:
+            if isinstance(p, dict):
+                _add(p.get("url"))
+            else:
+                _add(p)
+    # {"examples": {target: [source, ...]}} — structure.broken_internal_link:
+    # источники (страницы, которые ССЫЛАЮТСЯ на битый адрес) тоже затронуты.
+    examples = ev.get("examples")
+    if isinstance(examples, dict):
+        for sources in examples.values():
+            for u in sources or []:
+                _add(u)
+    return out
+
+
+def filter_findings_by_page(findings: list[dict[str, Any]], page_url: str,
+                             ) -> list[dict[str, Any]]:
+    """Находки этой страницы: свои напрямую + встреченные в evidence чужой.
+
+    Возвращает НОВЫЕ dict с добавленным `matched_via`, оригиналы не трогаем —
+    вызывающий код читает те же строки в других формах (site-wide отчёты).
+    """
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        via = ""
+        own_url = f.get("url") or ""
+        if own_url and same_url(own_url, page_url):
+            via = "url"
+        else:
+            for u in _evidence_urls(f):
+                if same_url(u, page_url):
+                    via = "evidence"
+                    break
+        if via:
+            item = dict(f)
+            item["matched_via"] = via
+            out.append(item)
+    return out
+
+
+def filter_tasks_by_page(tasks: list, page_url: str) -> list[tuple[Any, str]]:
+    """Задачи, затрагивающие эту страницу — как (task, matched_url) пары.
+
+    `matched_url` — тот конкретный URL из `task.urls`, что совпал с запросом
+    (может отличаться от `page_url` буквально: со слэшем/без, другая схема).
+    Задача возвращается ЦЕЛОЙ, а не projection с обрезанным списком urls —
+    её `fingerprint` не должен клониться под каждую страницу, иначе повторный
+    экспорт в трекер создал бы дубли одной и той же работы.
+    """
+    out: list[tuple[Any, str]] = []
+    for t in tasks:
+        for u in t.urls:
+            if same_url(u, page_url):
+                out.append((t, u))
+                break
+    return out
+
+
+def find_page(store: Store, site_id: int, page_url: str) -> dict[str, Any] | None:
+    """Найти строку страницы по точному адресу — как её видел движок при обходе.
+
+    Сравниваем и `url` (адрес, с которого начали), и `final_url` (адрес после
+    редиректов) — посетитель и поисковик видят именно final_url, но человек
+    мог назвать исходный адрес. Не найдено — вызывающий код обязан вернуть
+    SEO_PAGE_NOT_FOUND, а не подставлять «похожую» страницу.
+    """
+    for row in store.pages(site_id, only_done=False):
+        d = dict(row)
+        if same_url(d.get("url") or "", page_url) or \
+           same_url(d.get("final_url") or "", page_url):
+            head = d.get("head")
+            if isinstance(head, str):
+                try:
+                    head = json.loads(head)
+                except (ValueError, TypeError):
+                    head = {}
+            head = head if isinstance(head, dict) else {}
+            return {
+                "url": d.get("final_url") or d.get("url") or page_url,
+                "title": head.get("title") or "",
+                "canonical": head.get("canonical") or "",
+                "status": d.get("status"),
+                "fetched_at": d.get("fetched_at"),
+            }
+    return None
+
+
+def known_page_urls(store: Store, site_id: int, limit: int = 8) -> list[str]:
+    """Несколько известных адресов сайта — подсказка, если page_url не найден."""
+    out: list[str] = []
+    for row in store.pages(site_id, only_done=False):
+        u = row["final_url"] or row["url"]
+        if u and u not in out:
+            out.append(u)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def run_hint(site: str, page_url: str) -> str:
+    """Домен-подсказка для `resolve_run`, когда site не назван, а page_url есть.
+
+    Без этого «дай находки по https://g4s.md/» после аудита ДРУГОГО сайта
+    брало бы последний прогон ВООБЩЕ (не содержащий g4s.md) и отвечало бы
+    «сайта нет» — хотя он проверен и лежит в базе, просто не в последнем
+    прогоне. Тот же баг класса, что уже был описан для `site=...`
+    (см. `resolve_run`), просто для нового входа.
+    """
+    if site:
+        return site
+    if page_url:
+        return urlsplit(page_url).netloc
+    return ""
+
+
+def resolve_page_site(rows: list[dict[str, Any]], site: str, page_url: str,
+                      ) -> tuple[dict[str, Any] | None, bool]:
+    """Определить строку сайта из `site` и/или `page_url`.
+
+    `site` НЕОБЯЗАТЕЛЕН, когда задан `page_url` — сайт тогда угадывается по
+    хосту самого адреса: «дай отчёт по https://g4s.md/» не должно требовать
+    отдельно назвать домен, который и так виден в URL.
+
+    Возвращает (строка_сайта_или_None, mismatch). `mismatch=True` — оба
+    параметра заданы и указывают на РАЗНЫЕ хосты; вызывающий код обязан вернуть
+    SEO_PAGE_SITE_MISMATCH, а не молча выбрать один из двух — тихий выбор
+    ответил бы не на тот вопрос, который задали.
+    """
+    page_host = ""
+    if page_url:
+        page_host = urlsplit(page_url).netloc.lower().removeprefix("www.")
+
+    if site:
+        row = match_site(rows, site)
+        if row is not None and page_host:
+            if host_label(row["origin"]) != page_host:
+                return row, True
+        return row, False
+
+    if page_host:
+        for r in rows:
+            if host_label(r["origin"]) == page_host:
+                return r, False
+        return None, False
+
+    return None, False
+
+
+def page_markdown(store: Store, row: dict[str, Any], page: dict[str, Any],
+                  findings: list[dict[str, Any]], tasks: list) -> str:
+    """Отчёт по одной странице — обёртка в той же форме, что и `site_markdown`."""
+    return page_report_md(row["origin"], page, findings, tasks)
 
 
 def site_markdown(store: Store, row: dict[str, Any], tasks: list) -> str:
@@ -609,6 +818,7 @@ def site_detail(store: Store, host: str, *, min_severity: str = "medium",
     return {
         "host": needle,
         "origin": row["origin"],
+        "site_id": site_id,
         "state": row["state"],
         "error": row["error"] or "",
         "run_id": row["run_id"],
@@ -621,6 +831,62 @@ def site_detail(store: Store, host: str, *, min_severity: str = "medium",
         "by_severity": by_sev,
         "history": history,
     }
+
+
+def site_pages(store: Store, site_id: int, findings: list[dict[str, Any]],
+               *, only_issues: bool = False) -> list[dict[str, Any]]:
+    """Каждая страница сайта + её находки — основа экрана «Страницы».
+
+    Находки на страницу поднимаются через `filter_findings_by_page` — ТУ ЖЕ
+    функцию, что использует `list_findings(page_url=...)` в чате. Если бы
+    здесь было отдельное правило «что относится к странице», экран и чат со
+    временем ответили бы на один вопрос по-разному.
+
+    `only_issues=True` прячет страницы без единой находки — фильтр для
+    портфеля, где страниц может быть много больше, чем реальных проблем.
+    """
+    out: list[dict[str, Any]] = []
+    for row in store.pages(site_id, only_done=False):
+        d = dict(row)
+        url = d.get("final_url") or d.get("url") or ""
+        if not url:
+            continue
+        head = d.get("head")
+        if isinstance(head, str):
+            try:
+                head = json.loads(head)
+            except (ValueError, TypeError):
+                head = {}
+        head = head if isinstance(head, dict) else {}
+
+        page_findings = filter_findings_by_page(findings, url)
+        if only_issues and not page_findings:
+            continue
+
+        by_sev: dict[str, int] = {}
+        for f in page_findings:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        worst = ""
+        best_rank = 99
+        for sev in by_sev:
+            r = severity_rank(sev)
+            if r < best_rank:
+                best_rank, worst = r, sev
+
+        out.append({
+            "url": url,
+            "title": head.get("title") or "",
+            "status": d.get("status"),
+            "state": d.get("state"),
+            "fetched_at": d.get("fetched_at"),
+            "findings_count": len(page_findings),
+            "by_severity": by_sev,
+            "worst_severity": worst,
+        })
+
+    out.sort(key=lambda p: (severity_rank(p["worst_severity"]) if p["worst_severity"] else 99,
+                            p["url"]))
+    return out
 
 
 def findings_by_layer(findings: list[dict[str, Any]]) -> list[tuple[int, str, list[dict[str, Any]]]]:

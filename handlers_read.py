@@ -269,14 +269,41 @@ async def list_findings(ctx, params: ListFindingsParams) -> ActionResult:
         return err
     try:
         run_id = br.resolve_run(store, params.run_id,
-                                site=getattr(params, "site", "") or "")
+                                site=br.run_hint(params.site, getattr(params, "page_url", "") or ""))
         if not run_id:
             return _error(
                 f"Прогон #{params.run_id} не найден.", c.SEO_RUN_NOT_FOUND)
 
         rows, _tasks = br.site_rows(store, run_id,
                                     min_severity=params.min_severity)
-        if params.site:
+        page_url = (params.page_url or "").strip()
+
+        if page_url:
+            row, mismatch = br.resolve_page_site(rows, params.site, page_url)
+            if mismatch:
+                return _error(
+                    f"«{params.site}» и хост в page_url не совпадают — "
+                    f"уточните один из двух.",
+                    c.SEO_PAGE_SITE_MISMATCH,
+                )
+            if row is None:
+                known = ", ".join(br.host_label(r["origin"]) for r in rows[:8])
+                return _error(
+                    f"Сайт для страницы «{page_url}» в этом прогоне не "
+                    f"найден. Проверялись: {known or '—'}.",
+                    c.SEO_SITE_NOT_FOUND,
+                )
+            page = br.find_page(store, row["id"], page_url)
+            if page is None:
+                known = ", ".join(br.known_page_urls(store, row["id"]))
+                return _error(
+                    f"Страницы «{page_url}» нет среди проверенных на "
+                    f"{br.host_label(row['origin'])}. Известные адреса: "
+                    f"{known or '—'}.",
+                    c.SEO_PAGE_NOT_FOUND,
+                )
+            rows = [row]
+        elif params.site:
             row = br.match_site(rows, params.site)
             if row is None:
                 known = ", ".join(br.host_label(r["origin"]) for r in rows[:8])
@@ -290,7 +317,13 @@ async def list_findings(ctx, params: ListFindingsParams) -> ActionResult:
         limit_order = br.severity_rank(params.min_severity)
         picked: list[Finding] = []
         for r in rows:
-            for f in r["findings"]:
+            findings = r["findings"]
+            matched_via: dict[int, str] = {}
+            if page_url:
+                filtered = br.filter_findings_by_page(findings, page_url)
+                findings = filtered
+                matched_via = {id(f): f.get("matched_via", "") for f in filtered}
+            for f in findings:
                 if br.severity_rank(f["severity"]) > limit_order:
                     continue
                 picked.append(Finding(
@@ -307,6 +340,7 @@ async def list_findings(ctx, params: ListFindingsParams) -> ActionResult:
                     url=f["url"] or r["origin"],
                     message=f["message"],
                     detail=f["detail"] or "",
+                    matched_via=matched_via.get(id(f), ""),
                 ))
 
         # Порядок слоёв = порядок работ: сначала то, из-за чего страница вообще
@@ -315,7 +349,8 @@ async def list_findings(ctx, params: ListFindingsParams) -> ActionResult:
         shown = picked[: params.limit]
 
         if not picked:
-            where = f" на {params.site}" if params.site else ""
+            where = f" на {page_url}" if page_url else (
+                f" на {params.site}" if params.site else "")
             return ActionResult.success(
                 sdl.EntityList(items=[]),
                 f"Проблем уровня «{params.min_severity}» и выше{where} нет.",
@@ -345,14 +380,41 @@ async def list_tasks(ctx, params: ListTasksParams) -> ActionResult:
         return err
     try:
         run_id = br.resolve_run(store, params.run_id,
-                                site=getattr(params, "site", "") or "")
+                                site=br.run_hint(params.site, getattr(params, "page_url", "") or ""))
         if not run_id:
             return _error(
                 f"Прогон #{params.run_id} не найден.", c.SEO_RUN_NOT_FOUND)
 
         rows, tasks_by_site = br.site_rows(store, run_id,
                                            min_severity=params.min_severity)
-        if params.site:
+        page_url = (params.page_url or "").strip()
+
+        if page_url:
+            row, mismatch = br.resolve_page_site(rows, params.site, page_url)
+            if mismatch:
+                return _error(
+                    f"«{params.site}» и хост в page_url не совпадают — "
+                    f"уточните один из двух.",
+                    c.SEO_PAGE_SITE_MISMATCH,
+                )
+            if row is None:
+                known = ", ".join(br.host_label(r["origin"]) for r in rows[:8])
+                return _error(
+                    f"Сайт для страницы «{page_url}» в этом прогоне не "
+                    f"найден. Проверялись: {known or '—'}.",
+                    c.SEO_SITE_NOT_FOUND,
+                )
+            page = br.find_page(store, row["id"], page_url)
+            if page is None:
+                known = ", ".join(br.known_page_urls(store, row["id"]))
+                return _error(
+                    f"Страницы «{page_url}» нет среди проверенных на "
+                    f"{br.host_label(row['origin'])}. Известные адреса: "
+                    f"{known or '—'}.",
+                    c.SEO_PAGE_NOT_FOUND,
+                )
+            tasks_by_site = {row["origin"]: tasks_by_site.get(row["origin"], [])}
+        elif params.site:
             row = br.match_site(rows, params.site)
             if row is None:
                 return _error(
@@ -363,6 +425,11 @@ async def list_tasks(ctx, params: ListTasksParams) -> ActionResult:
 
         items: list[AuditTask] = []
         for origin, tasks in tasks_by_site.items():
+            matched_page_by: dict[str, str] = {}
+            if page_url:
+                pairs = br.filter_tasks_by_page(tasks, page_url)
+                tasks = [t for t, _u in pairs]
+                matched_page_by = {t.fingerprint: u for t, u in pairs}
             for t in tasks:
                 items.append(AuditTask(
                     id=t.fingerprint,
@@ -382,15 +449,18 @@ async def list_tasks(ctx, params: ListTasksParams) -> ActionResult:
                     tags=list(t.tags),
                     autofixable=t.autofixable,
                     fingerprint=t.fingerprint,
+                    matched_page=matched_page_by.get(t.fingerprint, ""),
                 ))
 
         items.sort(key=lambda x: (br.severity_rank(x.severity), x.site))
         shown = items[: params.limit]
 
         if not items:
+            where = f" на странице {page_url}" if page_url else ""
             return ActionResult.success(
                 sdl.EntityList(items=[]),
-                "Задач нет — по выбранному порогу важности всё в порядке.",
+                f"Задач{where} нет — по выбранному порогу важности всё в "
+                f"порядке.",
             )
         auto = sum(1 for x in items if x.autofixable)
         note = f" Из них {auto} правится автоматически." if auto else ""
@@ -416,7 +486,7 @@ async def get_report(ctx, params: GetReportParams) -> ActionResult:
         return err
     try:
         run_id = br.resolve_run(store, params.run_id,
-                                site=getattr(params, "site", "") or "")
+                                site=br.run_hint(params.site, getattr(params, "page_url", "") or ""))
         if not run_id:
             return _error(
                 f"Прогон #{params.run_id} не найден.", c.SEO_RUN_NOT_FOUND)
@@ -425,6 +495,56 @@ async def get_report(ctx, params: GetReportParams) -> ActionResult:
                                            min_severity=params.min_severity)
         if not rows:
             return _error("В этом прогоне нет сайтов.", c.SEO_NOTHING_TO_SHOW)
+
+        page_url = (params.page_url or "").strip()
+
+        if page_url:
+            row, mismatch = br.resolve_page_site(rows, params.site, page_url)
+            if mismatch:
+                return _error(
+                    f"«{params.site}» и хост в page_url не совпадают — "
+                    f"уточните один из двух.",
+                    c.SEO_PAGE_SITE_MISMATCH,
+                )
+            if row is None:
+                known = ", ".join(br.host_label(r["origin"]) for r in rows[:8])
+                return _error(
+                    f"Сайт для страницы «{page_url}» в этом прогоне не "
+                    f"найден. Проверялись: {known or '—'}.",
+                    c.SEO_SITE_NOT_FOUND,
+                )
+            page = br.find_page(store, row["id"], page_url)
+            if page is None:
+                known = ", ".join(br.known_page_urls(store, row["id"]))
+                return _error(
+                    f"Страницы «{page_url}» нет среди проверенных на "
+                    f"{br.host_label(row['origin'])}. Известные адреса: "
+                    f"{known or '—'}.",
+                    c.SEO_PAGE_NOT_FOUND,
+                )
+            findings = br.filter_findings_by_page(row["findings"], page_url)
+            tasks = [t for t, _u in br.filter_tasks_by_page(
+                tasks_by_site.get(row["origin"], []), page_url)]
+            md = br.page_markdown(store, row, page, findings, tasks)
+            crit_high = any(f["severity"] in (br.CRITICAL, br.HIGH)
+                            for f in findings)
+            entity = Report(
+                id=f"{br.host_label(row['origin'])}:{page['url']}",
+                title=f"Отчёт по странице: {page['url']}",
+                kind="seo_report",
+                scope="page",
+                markdown=md,
+                sites_count=1,
+                tasks_total=len(tasks),
+                page_url=page["url"],
+                findings_total=len(findings),
+                has_critical_or_high=crit_high,
+            )
+            return ActionResult.success(
+                entity,
+                f"Отчёт по странице {page['url']}: находок {len(findings)}, "
+                f"задач {len(tasks)}.",
+            )
 
         if params.site:
             row = br.match_site(rows, params.site)

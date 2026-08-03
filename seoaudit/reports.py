@@ -182,6 +182,82 @@ def portfolio_report_md(rows: list[dict[str, Any]], *, label: str = "") -> str:
     return "\n".join(lines)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ОТЧЁТ ПО ОДНОЙ СТРАНИЦЕ — компактный, для одного адреса (например, Home)
+# ══════════════════════════════════════════════════════════════════════════
+
+def page_report_md(origin: str, page: dict[str, Any],
+                   findings: list[dict[str, Any]], tasks: list[Task]) -> str:
+    """Отчёт по ОДНОЙ странице сайта — opt-in режим, не портфель и не сайт.
+
+    `page` — {"url", "title", "canonical", "status", "fetched_at"} (см.
+    `bridge.find_page`). `findings` — уже отфильтрованные под эту страницу,
+    каждая находка несёт `matched_via` ("url" — своя, "evidence" — страница
+    затронута находкой уровня сайта). Задачи аналогично уже отфильтрованы.
+
+    0-100 оценка здоровья сюда не переносится: это метрика САЙТА (считается
+    по всем страницам), а не одной страницы — переносить её означало бы
+    придумывать метрику, которой нет в движке.
+    """
+    lines: list[str] = []
+    add = lines.append
+
+    add(f"# SEO-аудит страницы: {page.get('url', '')}")
+    add("")
+    title = page.get("title") or ""
+    if title:
+        add(f"Заголовок страницы: «{title}»")
+    canon = page.get("canonical") or ""
+    if canon:
+        add(f"Canonical: {canon}")
+    fetched = page.get("fetched_at")
+    if fetched:
+        add(f"Последний обход: {fetched}")
+    add("")
+    add(f"Находок: **{len(findings)}** · задач к работе: **{len(tasks)}**")
+    add("")
+
+    if not findings:
+        add("Проблем на этой странице не найдено.")
+        return "\n".join(lines)
+
+    by_sev: dict[str, int] = {}
+    for f in findings:
+        by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+    summary = " · ".join(
+        f"{_SEV_RU[s]}: {by_sev[s]}" for s in _SEV_SEQ if by_sev.get(s)
+    )
+    add(f"Разбивка по важности: {summary}")
+    add("")
+
+    has_critical_or_high = bool(by_sev.get(CRITICAL) or by_sev.get(HIGH))
+    if has_critical_or_high:
+        add("**Есть критичные или важные проблемы — начинать с них.**")
+        add("")
+
+    add("## Находки, важные сверху")
+    add("")
+    ordered = sorted(
+        findings,
+        key=lambda f: _SEV_SEQ.index(f["severity"]) if f["severity"] in _SEV_SEQ else 9,
+    )
+    for f in ordered:
+        via = " _(через находку уровня сайта)_" if f.get("matched_via") == "evidence" else ""
+        add(f"- {_SEV_MARK[f['severity']]} `{f['rule']}` — {f['message']}{via}")
+    add("")
+
+    if tasks:
+        add("## Что делать")
+        add("")
+        for i, t in enumerate(tasks, 1):
+            auto = " · правится автоматически" if t.autofixable else ""
+            add(f"**{i}. {_SEV_MARK[t.severity]} {t.title}**  ")
+            add(f"Срок: {t.due_days} дн. · слой: {LAYER_NAMES.get(t.layer, t.layer)}{auto}")
+            add("")
+
+    return "\n".join(lines)
+
+
 def portfolio_json(rows: list[dict[str, Any]], tasks_by_site: dict[str, list[Task]]) -> str:
     payload = {
         "sites": rows,

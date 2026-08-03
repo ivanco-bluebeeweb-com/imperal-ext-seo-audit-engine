@@ -104,9 +104,24 @@ class ListConnectedParams(BaseModel):
         0, ge=0, description="Сколько сайтов пропустить — для следующей страницы")
 
 
+# Общее описание page_url — opt-in фильтр, включается только явной передачей
+# непустой строки. Пустое значение (по умолчанию) не меняет ни одной ветки
+# существующей site-wide логики: это чистая добавка, а не переключатель
+# поведения по умолчанию.
+_PAGE_URL_DESC = (
+    "Точный адрес ОДНОЙ страницы, например 'https://g4s.md/' для Home. "
+    "Опционально: пусто — поведение как раньше (по всему сайту/портфелю). "
+    "Сравнение — по нормализованному URL (без учёта регистра схемы/хоста, "
+    "конечного слэша); главная страница сайта и адрес БЕЗ слэша считаются "
+    "тем же адресом. Если такой страницы в прогоне нет, инструмент вернёт "
+    "явную ошибку, а не ближайший похожий URL."
+)
+
+
 class ListFindingsParams(RunScoped):
     site: str = Field(
         "", description="Домен, например 'climtec.md'. Пусто — весь портфель.")
+    page_url: str = Field("", description=_PAGE_URL_DESC)
     min_severity: str = Field(
         "medium",
         description=("Порог важности: critical, high, medium, low, info. "
@@ -122,6 +137,7 @@ class ListFindingsParams(RunScoped):
 
 class ListTasksParams(RunScoped):
     site: str = Field("", description="Домен. Пусто — задачи по всему портфелю.")
+    page_url: str = Field("", description=_PAGE_URL_DESC)
     min_severity: str = Field(
         "medium", description="Порог важности: critical, high, medium, low, info.")
     limit: int = Field(50, ge=1, le=200, description="Сколько задач вернуть")
@@ -138,6 +154,12 @@ class GetReportParams(RunScoped):
         description=("Домен для отчёта по одному сайту. Пусто — сводный отчёт "
                      "по всему портфелю."),
     )
+    page_url: str = Field(
+        "",
+        description=_PAGE_URL_DESC + (
+            " Если задан, отчёт строится ТОЛЬКО по этой странице (site можно "
+            "не указывать — определится по хосту page_url)."),
+    )
     min_severity: str = Field(
         "medium", description="Порог важности для задач в отчёте.")
 
@@ -149,6 +171,12 @@ class GetReportParams(RunScoped):
 
 class ExportPlanParams(RunScoped):
     site: str = Field("", description="Домен. Пусто — весь портфель.")
+    # Задел на будущее (см. план page-level слоя): поле принимается уже сейчас,
+    # чтобы схема не менялась второй раз, но пока НЕ фильтрует план — экспорт
+    # в трекер остаётся сайт/портфель-уровня, пока фильтрация не понадобится.
+    page_url: str = Field(
+        "", description="Зарезервировано под будущую фильтрацию по странице. "
+                        "Пока не влияет на план.")
     project: str = Field(
         "SEO", description="Название проекта в трекере, например 'SEO climtec'")
     assignee: str = Field(
@@ -297,6 +325,12 @@ class Finding(sdl.Entity):
     url: str = ""
     message: str = ""
     detail: str = ""
+    # Заполняется ТОЛЬКО при запросе с page_url: "url" — находка принадлежит
+    # именно этой странице напрямую; "evidence" — страница встретилась в
+    # списке затронутых внутри сайт-уровневой находки (сироты, битые
+    # ссылки и т.п.) — пользователю честно видно, что это не персональный дефект
+    # страницы, а отражение более широкой находки.
+    matched_via: str = ""
 
 
 class AuditTask(sdl.Entity):
@@ -314,15 +348,24 @@ class AuditTask(sdl.Entity):
     tags: list[str] = []
     autofixable: bool = False
     fingerprint: str = ""
+    # Заполняется только при запросе с page_url — какой из своих URL эта задача
+    # совпала с запрошенной страницей. Намеренно НЕ projection с обрезанным списком
+    # urls: fingerprint задачи не должен клонироваться под каждую страницу,
+    # иначе экспорт в трекер задвоится.
+    matched_page: str = ""
 
 
 class Report(sdl.Entity):
-    """Готовый отчёт в Markdown — по сайту или по портфелю."""
+    """Готовый отчёт в Markdown — по сайту, по портфелю или по одной странице."""
 
     scope: str = ""
     markdown: str = ""
     sites_count: int = 0
     tasks_total: int = 0
+    # Заполняются только когда scope=="page" (запрос с page_url).
+    page_url: str = ""
+    findings_total: int = 0
+    has_critical_or_high: bool = False
 
 
 class ScheduleState(sdl.Entity):
