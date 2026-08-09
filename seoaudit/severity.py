@@ -74,7 +74,7 @@ class Finding:
     detail: str = ""            # что именно не так, с фактами
     evidence: dict[str, Any] = field(default_factory=dict)
     fix_hint: str = ""          # что делать
-    auto_fixable: bool = False  # может ли починить wp-site-connector
+    auto_fixable: bool = False  # может ли починить wordpress-hub
     fix_field: str = ""         # какое поле править (meta_title/canonical_url/...)
     fix_value: str = ""         # предлагаемое значение, если оно вычислимо
 

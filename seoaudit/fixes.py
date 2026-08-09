@@ -6,7 +6,7 @@
 
 Этот модуль делает ровно её. На выходе — список правок вида
 «страница X, поле meta_title, новое значение Y», готовых к применению
-через wp-site-connector.
+через wordpress-hub.
 
 ГЛАВНОЕ ПРАВИЛО: не выдумывать. Если из данных страницы нельзя честно
 собрать значение — правка помечается как требующая человека, а не
@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 # Рамки длины — те же, что в правилах: одна норма на весь инструмент.
 from .rules import DESC_MAX, DESC_MIN, TITLE_MAX, TITLE_MIN
 
-# Поля, которые умеет менять wp-site-connector (update_seo_meta).
+# Поля, которые умеет менять wordpress-hub (update_seo_meta).
 FIELD_TITLE = "meta_title"
 FIELD_DESC = "meta_description"
 FIELD_CANONICAL = "canonical_url"
