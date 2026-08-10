@@ -193,6 +193,93 @@ class Store:
     def get_run(self, run_id: int) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
 
+    def copy_run(self, run_id: int, dest: "Store") -> int:
+        """Скопировать один прогон (с сайтами/страницами/находками) в другую БД.
+
+        ЗАЧЕМ ЭТО ЕСТЬ. `bridge.download_db`/`upload_db` работают со ВСЕЙ базой
+        портфеля разом: скачали, дописали, залили целиком обратно. Если два
+        вызова инструмента пересекаются по времени (повтор из-за таймаута,
+        параллельный аудит и ручной прогон одновременно), каждый видит СВОЙ
+        снимок и последняя заливка молча стирает прогон, записанный первым —
+        без единой ошибки для пользователя. Найдено на живом портфеле.
+
+        Этот метод — механизм ВОССТАНОВЛЕНИЯ после такой гонки: если перед
+        финальной заливкой окажется, что в хранилище уже лежит более новый
+        прогон, чем тот, с которого мы начинали, наш прогон переносится в эту
+        свежую копию вместо того, чтобы её перезаписать. Используются только
+        публичные методы Store (create_run/add_site/queue_urls/save_page_result/
+        add_findings) — так поведение копии гарантированно совпадает с тем, как
+        движок сам пишет эти строки, и схема не дублируется руками.
+
+        Возвращает id прогона В `dest` (может отличаться от `run_id` в `self`,
+        потому что автоинкремент в `dest` — свой).
+        """
+        run_row = self.get_run(run_id)
+        if run_row is None:
+            raise ValueError(f"run {run_id} not found")
+
+        new_run_id = dest.create_run(
+            label=run_row["label"] or "", profile=run_row["profile"] or "default"
+        )
+        if run_row["finished_at"]:
+            dest.db.execute(
+                "UPDATE runs SET finished_at=? WHERE id=?",
+                (run_row["finished_at"], new_run_id),
+            )
+            dest.db.commit()
+
+        for site in self.sites(run_id):
+            new_site_id = dest.add_site(new_run_id, site["origin"], site["label"] or "")
+            dest.set_site_state(
+                new_site_id, site["state"], site["error"] or "",
+                site["robots_txt"] or "",
+            )
+            try:
+                notes = json.loads(site["notes"] or "{}")
+            except (TypeError, ValueError):
+                notes = {}
+            if notes:
+                dest.set_site_notes(new_site_id, notes)
+
+            for page in self.pages(site["id"], only_done=False):
+                dest.queue_urls(new_site_id, [page["url"]], page["source"])
+                new_page = dest.db.execute(
+                    "SELECT id FROM pages WHERE site_id=? AND url=?",
+                    (new_site_id, page["url"]),
+                ).fetchone()
+                if new_page is None:
+                    continue  # практически невозможно — queue_urls только что вставил его
+                try:
+                    head = json.loads(page["head"] or "{}")
+                except (TypeError, ValueError):
+                    head = {}
+                dest.save_page_result(new_page["id"], {
+                    "state": page["state"],
+                    "status": page["status"],
+                    "final_url": page["final_url"] or "",
+                    "redirects": page["redirects"] or 0,
+                    "elapsed_ms": page["elapsed_ms"],
+                    "content_type": page["content_type"] or "",
+                    "bytes": page["bytes"] or 0,
+                    "error": page["error"] or "",
+                    "head": head,
+                    "cache_state": page["cache_state"] or "",
+                    "cache_layer": page["cache_layer"] or "",
+                })
+
+            findings = [dict(f) for f in self.findings(site["id"])]
+            for it in findings:
+                try:
+                    it["evidence"] = json.loads(it.get("evidence") or "{}")
+                except (TypeError, ValueError):
+                    it["evidence"] = {}
+                it["key"] = it.get("rule", "unknown")
+                it["title"] = it.get("message", "")
+            if findings:
+                dest.add_findings(new_site_id, findings)
+
+        return new_run_id
+
     # ------------------------------------------------------------------- sites
 
     def add_site(self, run_id: int, origin: str, label: str = "") -> int:

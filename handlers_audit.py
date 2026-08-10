@@ -17,6 +17,8 @@ advisory, ядро его не исполняет и автоматическо�
 
 from __future__ import annotations
 
+import os
+
 from imperal_sdk import ActionResult
 
 import bridge as br
@@ -52,6 +54,10 @@ async def audit_sites(ctx, params: AuditSitesParams) -> ActionResult:
     # Продолжаем существующий портфель, если он есть: одна база = один портфель,
     # так прогоны можно сравнивать между собой.
     db_path = await br.download_db(ctx) or br.new_db_path()
+    # Снимок ДО работы: если к моменту заливки в хранилище окажется прогон
+    # новее этого — значит кто-то залил параллельно, и заливку нужно слить,
+    # а не перезаписать (см. upload_run_safely).
+    base_max_run_id = br.max_run_id(db_path) if os.path.exists(db_path) else 0
 
     estimate = br.estimate_minutes(len(origins), params.max_pages)
     label = params.label or ""
@@ -77,7 +83,7 @@ async def audit_sites(ctx, params: AuditSitesParams) -> ActionResult:
             )
 
         try:
-            await br.upload_db(ctx, db_path)
+            run_id = await br.upload_run_safely(ctx, db_path, run_id, base_max_run_id)
         except Exception as exc:
             await ctx.log(f"audit db upload failed: {exc}", "error")
             return _error(
@@ -217,10 +223,14 @@ async def resume_audit(ctx, params: ResumeAuditParams) -> ActionResult:
     finally:
         store.close()
 
+    # Снимок ДО работы, см. upload_run_safely: нужен, чтобы после долгого
+    # resume отличить «никто не мешал» от «параллельно залили что-то новее».
+    base_max_run_id = br.max_run_id(db_path)
+
     async def work() -> ActionResult:
         try:
             await br.to_thread(br.resume_blocking, db_path, run_id)
-            await br.upload_db(ctx, db_path)
+            await br.upload_run_safely(ctx, db_path, run_id, base_max_run_id)
         except Exception as exc:
             await ctx.log(f"resume failed: {type(exc).__name__}: {exc}", "error")
             return _error(

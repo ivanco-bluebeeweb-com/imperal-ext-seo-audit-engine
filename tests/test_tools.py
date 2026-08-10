@@ -330,3 +330,82 @@ async def test_an_explicit_run_is_never_silently_replaced(ctx, monkeypatch, tmp_
 
     assert result.status == "error"
     assert result.error_code == c.SEO_SITE_NOT_FOUND
+
+
+# --- гонка между параллельными прогонами ------------------------------------
+#
+# РЕАЛЬНЫЙ БАГ, найденный на живом портфеле. download_db/upload_db работают со
+# ВСЕЙ базой сразу: скачали снимок, отработали минуты, залили обратно целиком.
+# Если два вызова пересекаются (повтор из-за таймаута, ручной аудит и ночной
+# прогон почти одновременно), оба видят один снимок, и последняя заливка молча
+# стирает прогон, записанный первым — без единой ошибки для пользователя.
+# upload_run_safely должен это ловить и сливать, а не затирать.
+
+def _seeded_db(tmp_path, name: str) -> str:
+    """Пустая база портфеля по нужному пути — то, с чем стартует download_db."""
+    from seoaudit.store import Store
+
+    path = str(tmp_path / name)
+    Store(path).close()
+    return path
+
+
+async def test_a_parallel_upload_is_merged_not_overwritten(tmp_path):
+    """Два «параллельных» прогона: второй не должен стереть первый.
+
+    Сценарий: вызов A скачивает базу (0 прогонов), считает run_id=1, работает.
+    Пока A работает, вызов B (например повтор того же запроса) тоже скачивает
+    базу (тоже видит 0 прогонов), тоже считает run_id=1 локально, и заливает
+    ПЕРВЫМ — в хранилище появляется прогон #1 (сайт B). Затем A пытается
+    залить свою локальную базу, где ЕЁ прогон тоже называется #1 (сайт A).
+    Без защиты это стёрло бы прогон B. upload_run_safely обязан обнаружить,
+    что в хранилище уже прогон новее base_max_run_id, и слить прогон A поверх
+    актуальной копии — оба прогона должны остаться читаемыми.
+    """
+    from imperal_sdk.testing import MockContext, MockSecretStore
+    import bridge as br
+
+    ctx = MockContext()
+    ctx.secrets = MockSecretStore({})
+
+    # --- вызов B стартует и финиширует первым: скачал пустую базу (снимок 0),
+    # посчитал свой прогон, залил в хранилище раньше A.
+    path_b = _seeded_db(tmp_path, "b.db")
+    base_max_run_id_b = br.max_run_id(path_b)  # 0 — портфель пуст на старте B
+    store_b = br.open_store(path_b)
+    run_id_b = store_b.create_run(label="прогон B")
+    site_b = store_b.add_site(run_id_b, "https://siteb.example")
+    store_b.set_site_state(site_b, "done")
+    store_b.finish_run(run_id_b)
+    store_b.close()
+    final_run_id_b = await br.upload_run_safely(ctx, path_b, run_id_b, base_max_run_id_b)
+    assert final_run_id_b == run_id_b == 1  # первая заливка — обычный путь
+
+    # --- вызов A стартовал РАНЬШЕ B (тот же снимок: 0 прогонов), но заливает
+    # ПОСЛЕ B — в хранилище уже есть прогон #1 (сайт B), которого A не видел.
+    path_a = _seeded_db(tmp_path, "a.db")
+    base_max_run_id_a = br.max_run_id(path_a)  # тоже 0 — тот же исходный снимок
+    store_a = br.open_store(path_a)
+    run_id_a = store_a.create_run(label="прогон A")
+    site_a = store_a.add_site(run_id_a, "https://sitea.example")
+    store_a.set_site_state(site_a, "done")
+    store_a.finish_run(run_id_a)
+    store_a.close()
+    final_run_id_a = await br.upload_run_safely(ctx, path_a, run_id_a, base_max_run_id_a)
+
+    # A должен быть слит поверх актуального хранилища, не стерев B.
+    merged_path = await br.download_db(ctx)
+    merged = br.open_store(merged_path)
+    try:
+        run_ids = {int(r["id"]) for r in merged.db.execute("SELECT id FROM runs")}
+        assert run_id_b in run_ids or 1 in run_ids, "прогон B пропал после заливки A"
+        # оба сайта должны быть читаемы хоть в каком-то прогоне хранилища
+        origins = {
+            r["origin"] for r in merged.db.execute("SELECT origin FROM sites")
+        }
+        assert "https://siteb.example" in origins
+        assert "https://sitea.example" in origins
+    finally:
+        merged.close()
+
+    assert final_run_id_a != 0

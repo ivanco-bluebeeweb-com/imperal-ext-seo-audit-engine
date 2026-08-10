@@ -125,6 +125,7 @@ async def seo_auto_audit(ctx) -> None:
     await sched.mark_ran(ctx)
 
     db_path = await br.download_db(ctx) or br.new_db_path()
+    base_max_run_id = br.max_run_id(db_path)
     try:
         run_id = await br.to_thread(
             br.run_audit_blocking,
@@ -144,7 +145,7 @@ async def seo_auto_audit(ctx) -> None:
         return
 
     try:
-        await br.upload_db(ctx, db_path)
+        run_id = await br.upload_run_safely(ctx, db_path, run_id, base_max_run_id)
     except Exception as exc:
         await ctx.log(f"scheduled audit upload failed: {exc}", "error")
         return
