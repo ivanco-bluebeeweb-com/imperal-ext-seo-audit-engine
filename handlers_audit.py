@@ -94,6 +94,15 @@ async def audit_sites(ctx, params: AuditSitesParams) -> ActionResult:
 
         store = br.open_store(db_path)
         try:
+            # Best-effort Core Web Vitals -- ДО site_rows, чтобы находка от
+            # page-speed-insights уже вошла в findings_total/tasks_by_site
+            # этого же прогона, а не появилась только при следующем чтении.
+            try:
+                site_list = [dict(s) for s in store.sites(run_id) if dict(s).get("state") == "done"]
+                await br.enrich_with_page_speed(ctx, store, run_id, site_list)
+            except Exception as exc:  # никогда не роняем сам аудит из-за этого
+                await ctx.log(f"page-speed-insights enrichment skipped: {exc}", "info")
+
             rows, tasks_by_site = br.site_rows(store, run_id)
             done = [r for r in rows if r["state"] == "done"]
             failed = [r for r in rows if r["state"] != "done"]

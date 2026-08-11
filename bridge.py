@@ -52,7 +52,7 @@ from seoaudit.reports import (
     portfolio_report_md,
     site_report_md,
 )
-from seoaudit.severity import CRITICAL, HIGH, LAYER_NAMES, SEVERITY_ORDER
+from seoaudit.severity import CRITICAL, HIGH, LAYER_NAMES, LAYER_TECHNICAL, SEVERITY_ORDER
 from seoaudit.store import Store
 from seoaudit.tasks import build_tasks
 from seoaudit.export_tracker import plan_for_tracker, summarise_plan
@@ -1097,6 +1097,62 @@ def site_in_run(store: Store, host: str, run_id: int) -> dict[str, Any] | None:
         [needle, run_id],
     ).fetchone()
     return dict(row) if row else None
+
+
+async def enrich_with_page_speed(ctx, store: Store, run_id: int, sites: list[dict]) -> None:
+    """Best-effort Core Web Vitals per site, добавленные ОДНОЙ дополнительной
+    находкой на сайт (не на страницу -- economics of a real Google API call).
+
+    ОДНОНАПРАВЛЕННАЯ ЗАВИСИМОСТЬ (тот же принцип, что list_connected_sites у
+    Sites Registry / WordPress Hub): SEO Audit Engine ЗНАЕТ про
+    page-speed-insights, page-speed-insights про SEO Audit Engine НЕ знает.
+    Если приложение не установлено, ключ не подключён, лимит исчерпан или
+    сеть моргнула -- аудит просто идёт без этой находки, никогда не падает
+    из-за отсутствующей интеграции.
+
+    `rule_performance` в rules.py уже даёт грубый сигнал по TTFB (elapsed_ms
+    самого HTML-ответа) -- он не заменяется, а дополняется реальными Core
+    Web Vitals (LCP/CLS/INP) там, где они доступны.
+    """
+    for site in sites:
+        origin = site.get("origin") or ""
+        site_id = site.get("id")
+        if not origin or not site_id:
+            continue
+        try:
+            result = await ctx.extensions.call(
+                "page-speed-insights", "check_site_speed_ipc",
+                url=origin, strategy="mobile",
+            )
+        except Exception as exc:  # приложение не установлено / метод не найден
+            await ctx.log(f"page-speed-insights IPC skipped for {origin}: {exc}", "info")
+            continue
+        if not isinstance(result, dict) or not result.get("ok"):
+            continue
+
+        poor = [
+            m for m in (result.get("field_metrics") or []) + (result.get("lab_metrics") or [])
+            if m.get("category") == "poor" and m.get("name") in ("LCP", "CLS", "INP")
+        ]
+        if not poor:
+            continue  # нет находки -- нечего добавлять, метрики в норме
+
+        names = ", ".join(f"{m['name']}={m['value']}{m.get('unit', '')}" for m in poor)
+        store.add_findings(site_id, [{
+            "key": "performance.core_web_vitals_poor",
+            "layer": LAYER_TECHNICAL,
+            "severity": HIGH,
+            "effort": 4,
+            "url": origin,
+            "title": "Core Web Vitals в зоне 'poor' (Google PageSpeed Insights)",
+            "detail": (
+                f"Реальные метрики из Page Speed Insights: {names}. "
+                "Это официальные пороги Google -- страница рискует получить "
+                "понижение в поисковой выдаче за скорость/стабильность."
+            ),
+            "evidence": {"metrics": poor, "source": "page-speed-insights"},
+            "fixable": False,
+        }])
 
 
 def compare_runs(store: Store, host: str, *, after_run: int,
