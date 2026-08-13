@@ -120,11 +120,28 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-async def _read(ctx) -> dict[str, Any]:
+async def _find(ctx):
+    """Locate the one settings document, if it exists.
+
+    NOT ctx.store.get(collection, SETTINGS_KEY): the real store assigns its
+    own generated document id on create and does not honour an "id" field
+    inside the data payload as that id. get()-by-fixed-key therefore never
+    finds a document this module itself created, and every _write() below
+    would silently create an orphaned duplicate that the next _read() can
+    never see again -- a real production bug the in-memory test double
+    never caught, because it happens to treat "id" as a real key. Querying
+    by the "key" field marks the row explicitly instead of relying on
+    document-id semantics that differ between environments.
+    """
     try:
-        doc = await ctx.store.get(SETTINGS_COLLECTION, SETTINGS_KEY)
+        page = await ctx.store.query(SETTINGS_COLLECTION, where={"key": SETTINGS_KEY}, limit=1)
     except Exception:
-        doc = None
+        return None
+    return page.data[0] if page.data else None
+
+
+async def _read(ctx) -> dict[str, Any]:
+    doc = await _find(ctx)
     data = dict(DEFAULTS)
     if doc is not None:
         raw = getattr(doc, "data", None) or {}
@@ -135,14 +152,15 @@ async def _read(ctx) -> dict[str, Any]:
 
 async def _write(ctx, data: dict[str, Any]) -> None:
     payload = {k: data.get(k, DEFAULTS[k]) for k in DEFAULTS}
+    payload["key"] = SETTINGS_KEY
     try:
-        await ctx.store.update(SETTINGS_COLLECTION, SETTINGS_KEY, payload)
+        existing = await _find(ctx)
+        if existing is not None:
+            await ctx.store.update(SETTINGS_COLLECTION, existing.id, payload)
+        else:
+            await ctx.store.create(SETTINGS_COLLECTION, payload)
     except Exception:
-        try:
-            await ctx.store.create(SETTINGS_COLLECTION,
-                                   {"id": SETTINGS_KEY, **payload})
-        except Exception:
-            pass
+        pass
 
 
 async def get_settings(ctx) -> dict[str, Any]:
