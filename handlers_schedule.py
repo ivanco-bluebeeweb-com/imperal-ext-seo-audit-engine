@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import re
+
 from imperal_sdk import ActionResult
 
 import bridge as br
@@ -22,6 +24,19 @@ import schedule_settings as sched
 from app import chat, ext
 from models import GetScheduleParams, ScheduleParams, ScheduleState
 from shared import error as _error, store_run_summary
+
+
+def _bare_domain(raw: str) -> str:
+    """Strip scheme/path/www from a URL or bare domain, lowercase it --
+
+    same normalization Sites Registry itself uses, so a domain registered
+    there and one already known here always compare equal."""
+    d = (raw or "").strip().lower()
+    d = re.sub(r"^https?://", "", d)
+    d = d.split("/", 1)[0]
+    if d.startswith("www."):
+        d = d[4:]
+    return d
 
 
 def _fmt_changes(items: list, limit: int = 5) -> str:
@@ -80,6 +95,39 @@ async def _morning_report(ctx, run_id: int, origins: list[str]) -> str:
         return "\n".join(head)
     finally:
         store.close()
+
+
+@ext.expose("register_known_site", action_type="write")
+async def expose_register_known_site(ctx, site_id: str = "", domain: str = "",
+                                       name: str = "", **kwargs) -> dict:
+    """Inter-extension IPC surface (ctx.extensions.call) for Sites Registry:
+    called automatically whenever a site is registered there (manually,
+    via WordPress Hub's connect, or via a registry sync/backfill), so it
+    is already known here as a site to audit.
+
+    Deliberately does NOT run an audit and does NOT enable the schedule --
+    this app only ever touches someone else's site on an explicit ask, and
+    a site landing in the registry is not that ask. It only appends the
+    domain to the schedule's own site list (if not already present), so it
+    shows up as a known/remembered site and gets picked up the next time an
+    audit runs or the user turns the schedule on. Idempotent: adding an
+    already-known domain changes nothing. Returns a plain dict (never
+    surfaced to the LLM/user directly).
+    """
+    sid = _bare_domain(site_id or domain)
+    if not sid:
+        return {"ok": False, "error": "site_id or domain is required.", "retryable": False}
+    settings = await sched.get_settings(ctx)
+    known = br.parse_sites(str(settings.get("sites") or ""))
+    known_bare = {_bare_domain(o) for o in known}
+    if sid in known_bare:
+        return {"ok": True, "site_id": sid, "created": False}
+    updated = known + [f"https://{sid}"]
+    await sched.set_settings(
+        ctx, sites=", ".join(updated),
+        reason="auto-registered from Sites Registry",
+    )
+    return {"ok": True, "site_id": sid, "created": True}
 
 
 @ext.schedule("seo_auto_audit", sched.TICK_CRON)
