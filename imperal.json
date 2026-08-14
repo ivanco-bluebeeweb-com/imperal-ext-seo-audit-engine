@@ -1,6 +1,6 @@
 {
   "manifest_schema_version": 3,
-  "sdk_version": "5.9.13",
+  "sdk_version": "5.9.19",
   "app_id": "seo-audit-engine",
   "version": "1.0.0",
   "name": "SEO Audit Engine",
@@ -2258,6 +2258,12 @@
   ],
   "required_scopes": [],
   "icon_size_bytes": 448,
+  "exposed": [
+    {
+      "name": "register_known_site",
+      "action_type": "write"
+    }
+  ],
   "lifecycle": {
     "on_install": true,
     "health_check": {

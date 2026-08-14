@@ -146,7 +146,7 @@ async def test_pages_screen_unknown_site_shows_info_not_error(
     page = await panels.seo_center(ctx, view="pages", site="unknown-site.example")
     alerts = [n for n in _flatten(page) if n.type == "Alert"]
 
-    assert alerts and alerts[0].props.get("type") == "info"
+    assert alerts and alerts[0].props.get("variant") == "info"
 
 
 async def test_pages_screen_row_click_opens_page_card(ctx, monkeypatch, pages_db):
@@ -212,7 +212,7 @@ async def test_page_screen_missing_page_param_asks_instead_of_guessing(
     page = await panels.seo_center(ctx, view="page", site="g4s.md")
     alerts = [n for n in _flatten(page) if n.type == "Alert"]
 
-    assert alerts and alerts[0].props.get("type") == "info"
+    assert alerts and alerts[0].props.get("variant") == "info"
 
 
 async def test_site_card_links_to_pages_screen(ctx, monkeypatch, pages_db):
