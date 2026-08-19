@@ -5,6 +5,19 @@
 
 ---
 
+## 2026-08-19 — Plausible Scenario Testing (PST) — 8 непокрытых функций закрыты
+
+Полный метод и детали — в `SCENARIO_TESTS.md` этого приложения. Кратко:
+из 14 функций и 187 существующих тестов 8 никогда не тестировались через
+свой реальный хендлер: `list_runs`, `list_sites`, `export_plan`,
+`fix_plan`, `compare_audits`, `set_schedule`, `get_schedule`,
+`register_known_site` (IPC для Sites Registry). Закрыты 16 новыми тестами
+в `tests/test_pst_scenarios.py`, сидирование через реальный sqlite Store
+(движок правил не подделывается). Полный набор (203 теста) зелёный.
+Реальных багов не найдено.
+
+---
+
 ## 2026-08-19 — Сквозной пост-аудит
 
 **Что проверялось:** py_compile всех 10 модулей; количество `@chat.function`
