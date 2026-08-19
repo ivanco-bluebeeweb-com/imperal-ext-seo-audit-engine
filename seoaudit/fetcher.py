@@ -3,11 +3,25 @@
 Главный риск на 20-200 сайтах — превратить аудит в DDoS клиентских серверов.
 Поэтому: лимит одновременных запросов НА ХОСТ, пауза между запросами к одному
 хосту, ограничение размера тела, повторы только на осмысленных ошибках.
+
+ВТОРОЙ РИСК, отдельный от вежливости: `audit_sites` принимает произвольную
+строку домена от пользователя, а эта строка становится реальным адресом
+подключения. Без проверки резолва это готовый SSRF — пользователь мог бы
+"провести аудит" 127.0.0.1, внутреннего сервиса за файрволом или облачного
+metadata-эндпоинта 169.254.169.254. `_check_host_is_public` резолвит хост и
+отказывает на ЛЮБОМ приватном/loopback/link-local/reserved адресе, и
+вызывается на КАЖДОМ хопе `fetch()` — то есть и на редиректе тоже, потому
+что редирект на внутренний адрес — тот же самый SSRF, только на шаг позже.
+Известный остаточный риск: DNS rebinding между проверкой и самим connect()
+(меняющий IP хоста в узкое окно между resolve и socket-open) этой защитой не
+закрывается — urllib не даёт просто "приколоть" уже проверенный IP к
+последующему TLS-подключению без гораздо более инвазивной замены транспорта.
 """
 
 from __future__ import annotations
 
 import gzip
+import ipaddress
 import socket
 import ssl
 import threading
@@ -70,6 +84,46 @@ def read_cache_headers(headers: dict[str, str]) -> tuple[str, str]:
 
 MAX_BYTES = 1_500_000  # больше для <head> не нужно, а память экономит
 RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+class SSRFBlockedError(Exception):
+    """Хост резолвится на приватный/loopback/link-local/reserved адрес.
+
+    Не наследуется от urllib.error.* нарочно: это не сетевая ошибка сайта,
+    а отказ самого аудита идти туда, куда его отправили. fetch() ловит это
+    отдельно от обычных сетевых сбоев, чтобы находка звучала как «этот адрес
+    не проверяется» а не как «сайт не отвечает».
+    """
+
+
+def _check_host_is_public(host: str) -> str | None:
+    """Резолвит host и возвращает причину отказа, либо None если можно идти.
+
+    Проверяет КАЖДЫЙ резолвленный адрес (A и AAAA) — если хотя бы один из
+    них приватный/loopback/link-local/reserved/multicast, отказываем всему
+    хосту целиком, а не только этому конкретному IP: DNS с несколькими
+    ответами не даёт нам выбирать, какой IP реально будет использован для
+    connect() на следующем шаге urllib.
+    """
+    hostname = host.split(":")[0].strip("[]")  # убрать порт и IPv6-скобки
+    if not hostname:
+        return "пустой адрес хоста"
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as e:
+        return f"адрес не резолвится: {e}"
+    for info in infos:
+        raw_ip = info[4][0]
+        try:
+            ip = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            continue
+        if (
+            ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+        ):
+            return f"адрес {raw_ip} — приватный/служебный, аудит внешних сайтов туда не ходит"
+    return None
 
 
 @dataclass
@@ -276,7 +330,29 @@ class Fetcher:
         current = _with_cache_buster(url) if cache_bust else url
         total_ms = 0
         for hop in range(max_redirects + 1):
-            host = urlsplit(current).netloc
+            parts = urlsplit(current)
+            host = parts.netloc
+            if parts.scheme not in ("http", "https"):
+                return {
+                    "ok": False,
+                    "error": f"схема адреса не поддерживается: {parts.scheme or '(пусто)'}",
+                    "requested_url": url,
+                    "final_url": current,
+                    "redirects": len(chain),
+                    "chain": chain,
+                    "elapsed_ms": total_ms,
+                }
+            blocked_reason = _check_host_is_public(host)
+            if blocked_reason:
+                return {
+                    "ok": False,
+                    "error": f"адрес заблокирован: {blocked_reason}",
+                    "requested_url": url,
+                    "final_url": current,
+                    "redirects": len(chain),
+                    "chain": chain,
+                    "elapsed_ms": total_ms,
+                }
             self.gate.acquire(host)
             try:
                 attempt = 0
