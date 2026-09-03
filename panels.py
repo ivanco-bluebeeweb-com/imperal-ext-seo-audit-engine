@@ -1441,15 +1441,14 @@ async def seo_nav(ctx, **kwargs):
 
     SKETCH -- left nav
       ui.Stack (v, gap=2)
-        ui.Button("+ Добавить сайт", full_width=True)   # ВСЕГДА, первым
+        ui.Button("+ Добавить сайт")   # ВСЕГДА, первым
         ui.Text(content=<состояние>, variant="caption")
-        ui.Button("Открыть портфель", full_width=True)  # если есть что открывать
-        ui.Button("Задачи", variant="ghost", full_width=True)
+        ui.Button("Открыть портфель")  # если есть что открывать
+        ui.Button("Задачи", variant="ghost")
     """
     # Главное действие. Собирается ДО чтения данных — сознательно.
     children = [
-        ui.Button(label="+ Добавить сайт", full_width=True,
-                  on_click=ui.Call("__panel__seo", view="add")),
+        ui.Button(label="+ Добавить сайт", on_click=ui.Call("__panel__seo", view="add")),
     ]
 
     # Сайдбар читает ЛЁГКО. Раньше здесь вызывался `_load`, который поднимает
@@ -1471,22 +1470,18 @@ async def seo_nav(ctx, **kwargs):
             # Список сайтов — второе по важности действие после «добавить»:
             # именно его спрашивают первым, когда портфель большой.
             ui.Button(label=f"Все сайты ({total})", variant="secondary",
-                      full_width=True,
                       on_click=ui.Call("__panel__seo", view="sites")),
             ui.Button(label="Сводка по портфелю", variant="secondary",
-                      full_width=True, on_click=ui.Call("__panel__seo")),
-            ui.Button(label="Задачи", variant="ghost", full_width=True,
-                      on_click=ui.Call("__panel__seo", view="tasks")),
+                      on_click=ui.Call("__panel__seo")),
+            ui.Button(label="Задачи", variant="ghost", on_click=ui.Call("__panel__seo", view="tasks")),
             ui.Button(label="Готовые правки", variant="ghost",
-                      full_width=True,
                       on_click=ui.Call("__panel__seo", view="fixes")),
         ]
 
     # Расписание видно ВСЕГДА, как и «добавить сайт»: настроить ночной аудит
     # осмысленно и до первого прогона, и когда база не читается.
     extra.append(
-        ui.Button(label="Расписание", variant="ghost", full_width=True,
-                  on_click=ui.Call("__panel__seo", view="schedule")))
+        ui.Button(label="Расписание", variant="ghost", on_click=ui.Call("__panel__seo", view="schedule")))
 
     children.append(ui.Text(content=state, variant="caption"))
     children.extend(extra)
