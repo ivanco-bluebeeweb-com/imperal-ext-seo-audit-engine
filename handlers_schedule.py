@@ -130,25 +130,32 @@ async def expose_register_known_site(ctx, site_id: str = "", domain: str = "",
     return {"ok": True, "site_id": sid, "created": True}
 
 
-@ext.schedule("seo_auto_audit", sched.TICK_CRON)
-async def seo_auto_audit(ctx) -> None:
-    """Будильник: спрашивает «уже пора?» и обычно уходит спать.
+def _make_user_ctx(ctx, user_id: str):
+    try:
+        return ctx.as_user(user_id)
+    except Exception:
+        from copy import copy
+        from imperal_sdk.types.identity import UserContext
+        u_ctx = copy(ctx)
+        u_ctx.user = UserContext(
+            imperal_id=user_id,
+            email=f"{user_id}@imperal.io",
+            tenant_id=getattr(getattr(ctx, "user", None), "tenant_id", "default") or "default",
+            role="user",
+        )
+        return u_ctx
 
-    Пропущенный тик стоит одно чтение настройки и НИ ОДНОГО обращения к
-    чужим сайтам. Поэтому частый тик здесь дёшев, а редкий аудит — честно
-    редкий: тик не есть прогон, он лишь будильник рядом с ним.
-    """
-    ok, reason = await sched.due(ctx)
+
+async def _run_audit_for_user(user_ctx) -> None:
+    ok, reason = await sched.due(user_ctx)
     if not ok:
         return
 
-    settings = await sched.get_settings(ctx)
+    settings = await sched.get_settings(user_ctx)
 
     origins = br.parse_sites(str(settings.get("sites") or ""))
     if not origins:
-        # Сайты не заданы — берём те, что проверяли в прошлый раз. Это то,
-        # чего человек ждёт от «проверяй каждую неделю»: тот же портфель.
-        db_path = await br.download_db(ctx)
+        db_path = await br.download_db(user_ctx)
         if db_path:
             store = br.open_store(db_path)
             try:
@@ -159,20 +166,15 @@ async def seo_auto_audit(ctx) -> None:
                 store.close()
 
     if not origins:
-        await ctx.log("scheduled audit skipped: no sites known", "info")
+        await user_ctx.log("scheduled audit skipped: no sites known", "info")
         return
 
-    # Потолок: автопрогон не должен вырасти в многочасовой обход чужих
-    # серверов из-за того, что портфель разросся, а расписание никто не
-    # пересматривал.
     if len(origins) > sched.MAX_SITES_PER_RUN:
         origins = origins[: sched.MAX_SITES_PER_RUN]
 
-    # Отметка ДО прогона: см. mark_ran — упавший аудит не должен повторяться
-    # на каждом тике.
-    await sched.mark_ran(ctx)
+    await sched.mark_ran(user_ctx)
 
-    db_path = await br.download_db(ctx) or br.new_db_path()
+    db_path = await br.download_db(user_ctx) or br.new_db_path()
     base_max_run_id = br.max_run_id(db_path)
     try:
         run_id = await br.to_thread(
@@ -183,9 +185,8 @@ async def seo_auto_audit(ctx) -> None:
             max_pages=int(settings.get("max_pages", 50)),
         )
     except Exception as exc:
-        await ctx.log(f"scheduled audit failed: {type(exc).__name__}: {exc}",
-                      "error")
-        await ctx.deliver_chat_message(
+        await user_ctx.log(f"scheduled audit failed: {type(exc).__name__}: {exc}", "error")
+        await user_ctx.deliver_chat_message(
             "Ночной аудит не удалось завершить. Подробности в журнале; "
             "можно продолжить командой «продолжи аудит».",
             msg_type="system",
@@ -193,20 +194,71 @@ async def seo_auto_audit(ctx) -> None:
         return
 
     try:
-        run_id = await br.upload_run_safely(ctx, db_path, run_id, base_max_run_id)
+        run_id = await br.upload_run_safely(user_ctx, db_path, run_id, base_max_run_id)
     except Exception as exc:
-        await ctx.log(f"scheduled audit upload failed: {exc}", "error")
+        await user_ctx.log(f"scheduled audit upload failed: {exc}", "error")
         return
 
-    await sched.mark_ran(ctx, run_id=run_id)
+    await sched.mark_ran(user_ctx, run_id=run_id)
 
-    text = await _morning_report(ctx, run_id, origins)
+    text = await _morning_report(user_ctx, run_id, origins)
     try:
-        await ctx.deliver_chat_message(text, refresh_panels=["seo", "seo_nav"])
+        await user_ctx.deliver_chat_message(text, refresh_panels=["seo", "seo_nav"])
     except Exception as exc:
-        # Доставка в чат — не часть аудита. Прогон уже сохранён, и терять
-        # его из-за недоставленного сообщения нельзя.
-        await ctx.log(f"morning report not delivered: {exc}", "error")
+        await user_ctx.log(f"morning report not delivered: {exc}", "error")
+
+
+@ext.schedule("seo_auto_audit", sched.TICK_CRON)
+async def seo_auto_audit(ctx) -> None:
+    """Будильник: опрашивает пользователей с настроенным расписанием.
+
+    В системном контексте выполняет multi-user fan-out через list_users(SETTINGS_COLLECTION).
+    Для каждого пользователя исполняет аудит строго в его собственном изолированном контексте.
+    """
+    uid = getattr(getattr(ctx, "user", None), "imperal_id", "") or ""
+    if uid and uid != "__system__":
+        await _run_audit_for_user(ctx)
+        return
+
+    if hasattr(ctx, "store") and hasattr(ctx.store, "list_users"):
+        try:
+            async for user_id in ctx.store.list_users(sched.SETTINGS_COLLECTION):
+                if not user_id or user_id == "__system__":
+                    continue
+                user_ctx = _make_user_ctx(ctx, user_id)
+                try:
+                    await _run_audit_for_user(user_ctx)
+                except Exception as exc:
+                    await ctx.log(f"seo_auto_audit failed for user {user_id}: {exc}", "error")
+            return
+        except Exception as exc:
+            await ctx.log(f"list_users iteration failed in seo_auto_audit: {exc}", "warning")
+    else:
+        # Fallback for environments / test doubles where list_users is not implemented
+        try:
+            page = await ctx.store.query(sched.SETTINGS_COLLECTION, limit=500)
+            user_ids = set()
+            for doc in (page.data if page else []):
+                data = getattr(doc, "data", {}) or {}
+                u_id = str(data.get("user_id") or "").strip()
+                if not u_id:
+                    k = str(data.get("key") or "")
+                    if k.startswith(f"{sched.SETTINGS_KEY}:"):
+                        u_id = k.split(f"{sched.SETTINGS_KEY}:", 1)[1].strip()
+                if u_id and u_id != "__system__":
+                    user_ids.add(u_id)
+            if user_ids:
+                for u_id in sorted(user_ids):
+                    user_ctx = _make_user_ctx(ctx, u_id)
+                    try:
+                        await _run_audit_for_user(user_ctx)
+                    except Exception as exc:
+                        await ctx.log(f"seo_auto_audit failed for user {u_id}: {exc}", "error")
+                return
+        except Exception as exc:
+            await ctx.log(f"query iteration fallback failed in seo_auto_audit: {exc}", "warning")
+
+    await _run_audit_for_user(ctx)
 
 
 @chat.function(

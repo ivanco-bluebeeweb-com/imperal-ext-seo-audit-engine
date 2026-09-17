@@ -60,13 +60,20 @@ async def store_run_summary(ctx, run_id: int, data: dict) -> None:
 
     Чтобы «покажи прогоны» отвечало мгновенно, не скачивая базу на десятки
     мегабайт. Сбой кеширования никогда не должен ломать аудит — он уже прошёл.
+    Сводка изолируется по user_id текущего пользователя.
     """
+    uid = str(getattr(getattr(ctx, "user", None), "imperal_id", "") or "").strip()
+    payload = dict(data)
+    if uid:
+        payload["user_id"] = uid
+    where = {"run_id": run_id}
+    if uid:
+        where["user_id"] = uid
     try:
-        page = await ctx.store.query(br.RUNS_COLLECTION,
-                                     where={"run_id": run_id}, limit=1)
+        page = await ctx.store.query(br.RUNS_COLLECTION, where=where, limit=1)
         if page.data:
-            await ctx.store.update(br.RUNS_COLLECTION, page.data[0].id, data)
+            await ctx.store.update(br.RUNS_COLLECTION, page.data[0].id, payload)
         else:
-            await ctx.store.create(br.RUNS_COLLECTION, data)
+            await ctx.store.create(br.RUNS_COLLECTION, payload)
     except Exception:
         pass

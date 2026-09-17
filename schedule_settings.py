@@ -120,8 +120,17 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+def _user_id(ctx) -> str:
+    return str(getattr(getattr(ctx, "user", None), "imperal_id", "") or "").strip()
+
+
+def _settings_key(ctx) -> str:
+    uid = _user_id(ctx)
+    return f"{SETTINGS_KEY}:{uid}" if uid else SETTINGS_KEY
+
+
 async def _find(ctx):
-    """Locate the one settings document, if it exists.
+    """Locate the user-scoped settings document, if it exists.
 
     NOT ctx.store.get(collection, SETTINGS_KEY): the real store assigns its
     own generated document id on create and does not honour an "id" field
@@ -130,14 +139,29 @@ async def _find(ctx):
     would silently create an orphaned duplicate that the next _read() can
     never see again -- a real production bug the in-memory test double
     never caught, because it happens to treat "id" as a real key. Querying
-    by the "key" field marks the row explicitly instead of relying on
-    document-id semantics that differ between environments.
+    by the scoped "key" and "user_id" fields marks the row explicitly
+    instead of relying on document-id semantics that differ between environments.
     """
+    uid = _user_id(ctx)
+    target_key = _settings_key(ctx)
+    where = {"key": target_key}
+    if uid:
+        where["user_id"] = uid
     try:
-        page = await ctx.store.query(SETTINGS_COLLECTION, where={"key": SETTINGS_KEY}, limit=1)
+        page = await ctx.store.query(SETTINGS_COLLECTION, where=where, limit=1)
+        if page.data:
+            return page.data[0]
     except Exception:
-        return None
-    return page.data[0] if page.data else None
+        pass
+
+    # Migration fallback: check legacy un-scoped document
+    try:
+        legacy = await ctx.store.query(SETTINGS_COLLECTION, where={"key": SETTINGS_KEY}, limit=1)
+        if legacy.data:
+            return legacy.data[0]
+    except Exception:
+        pass
+    return None
 
 
 async def _read(ctx) -> dict[str, Any]:
@@ -152,10 +176,13 @@ async def _read(ctx) -> dict[str, Any]:
 
 async def _write(ctx, data: dict[str, Any]) -> None:
     payload = {k: data.get(k, DEFAULTS[k]) for k in DEFAULTS}
-    payload["key"] = SETTINGS_KEY
+    uid = _user_id(ctx)
+    payload["key"] = _settings_key(ctx)
+    if uid:
+        payload["user_id"] = uid
     try:
         existing = await _find(ctx)
-        if existing is not None:
+        if existing is not None and getattr(existing, "data", {}).get("key") == payload["key"]:
             await ctx.store.update(SETTINGS_COLLECTION, existing.id, payload)
         else:
             await ctx.store.create(SETTINGS_COLLECTION, payload)
